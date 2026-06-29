@@ -34,11 +34,25 @@ deploy.sh          # deploy 1-comando via CloudShell
 scripts/package.mjs# zip pra upload manual no console (alternativa)
 ```
 
+## Permissões IAM (se o usuário não for admin)
+
+O deploy provisiona a stack inteira (CloudFormation/SAM). Usuário **admin** já
+tem tudo. Se for um usuário **restrito**, anexe estas políticas gerenciadas:
+
+| Política | Pra quê |
+|---|---|
+| `AWSCloudShellFullAccess` | Abrir o CloudShell |
+| `AWSCloudFormationFullAccess` | Criar/gerenciar a stack |
+| `AWSLambda_FullAccess` | Criar a função do connector |
+| `AmazonEventBridgeFullAccess` | Criar as regras de captura/filtragem |
+| `IAMFullAccess` | Criar a role `ArgosCloudTrailConnectorRole` |
+
 ## Deploy (recomendado: AWS CloudShell)
 
 > Use **us-east-1** — eventos de console sign-in são globais e emitidos lá.
 > A conta precisa ter um **CloudTrail trail** ativo (multi-region) para os
-> eventos de API fluírem ao EventBridge.
+> eventos de API fluírem ao EventBridge. Na criação rápida (*Quick create*) o
+> trail já nasce multi-region + management events (gratuito).
 
 1. No painel Argos (`/admin/sources`) crie a fonte do tipo **AWS CloudTrail** e
    copie o **UUID da fonte** e o **secret HMAC** (exibido uma única vez).
@@ -74,6 +88,21 @@ Em segundos o evento aparece no dashboard do Argos. Limpe depois:
 aws iam delete-login-profile --user-name argos-smoke-test
 aws iam delete-user --user-name argos-smoke-test
 ```
+
+> O connector roda **independente** na AWS — não precisa deixar o CloudShell
+> aberto. Pode `exit` e fechar a aba; o monitoramento segue ativo.
+
+## Resolução de problemas
+
+- **`Permission denied` ao rodar `./deploy.sh`** → `chmod +x deploy.sh` e tente de novo.
+- **`ROLLBACK_COMPLETE … can not be updated`** → um deploy anterior falhou; limpe a
+  stack, espere ~30s e rode de novo:
+  ```bash
+  aws cloudformation delete-stack --stack-name argos-cloudtrail-connector
+  ```
+- **`AccessDenied` / `not authorized`** → falta permissão IAM (veja a tabela acima).
+- **Fonte fica "aguardando eventos"** → gere um evento que casa uma regra; confira
+  invocações em **Lambda → argos-cloudtrail-connector → Monitor → Logs**.
 
 ## Desenvolvimento
 
