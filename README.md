@@ -51,6 +51,7 @@ cd argos-connector-aws
 
 export ARGOS_SOURCE_CONNECTION_ID="<uuid da fonte>"
 export ARGOS_HMAC_SECRET="<secret HMAC>"
+chmod +x deploy.sh   # garante permissão de execução
 ./deploy.sh
 ```
 
