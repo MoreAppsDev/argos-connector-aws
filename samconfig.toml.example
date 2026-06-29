@@ -1,0 +1,14 @@
+# Copie para samconfig.toml e ajuste. NÃO comite o samconfig.toml com o secret.
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "argos-cloudtrail-connector"
+region = "us-east-1"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+parameter_overrides = [
+  "IngestUrl=https://argos.moreapps.com.br/api/ingest/security-event",
+  "SourceConnectionId=COLE_O_UUID_DA_FONTE",
+  "HmacSecret=COLE_O_SECRET_HMAC",
+]

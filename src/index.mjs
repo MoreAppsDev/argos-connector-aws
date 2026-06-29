@@ -1,0 +1,80 @@
+/**
+ * Argos V2 — AWS CloudTrail connector / Lambda handler.
+ *
+ * Fluxo: EventBridge entrega um registro CloudTrail → aplica as regras de
+ * detecção (edge filter) → se casa, assina o payload com HMAC-SHA256 e faz
+ * POST no endpoint de ingestão do Argos. Eventos que não casam são descartados
+ * aqui mesmo (não trafegam, não custam).
+ *
+ * Node 20 (ESM). Sem dependências: usa `node:crypto` e `fetch` nativos.
+ *
+ * Variáveis de ambiente (injetadas pelo CloudFormation/SAM):
+ *   ARGOS_INGEST_URL            ex: https://argos.moreapps.com.br/api/ingest/security-event
+ *   ARGOS_SOURCE_CONNECTION_ID  UUID da source_connection criada no painel Argos
+ *   ARGOS_HMAC_SECRET           secret HMAC exibido uma vez na criação da fonte
+ */
+
+import { createHmac } from 'node:crypto';
+
+import { detect, toIngestPayload } from './detection.mjs';
+
+const INGEST_URL = process.env.ARGOS_INGEST_URL;
+const CONNECTION_ID = process.env.ARGOS_SOURCE_CONNECTION_ID;
+const HMAC_SECRET = process.env.ARGOS_HMAC_SECRET;
+
+function sign(rawBody) {
+  const hex = createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf-8').digest('hex');
+  return `sha256=${hex}`;
+}
+
+/** EventBridge pode entregar o registro em `detail`, ou o próprio evento já é o registro. */
+function extractRecord(event) {
+  if (event?.detail && typeof event.detail === 'object') return event.detail;
+  return event;
+}
+
+export async function handler(event) {
+  if (!INGEST_URL || !CONNECTION_ID || !HMAC_SECRET) {
+    // Config faltando é erro de deploy — falha alto pra aparecer no CloudWatch.
+    throw new Error(
+      'Connector mal configurado: defina ARGOS_INGEST_URL, ARGOS_SOURCE_CONNECTION_ID e ARGOS_HMAC_SECRET.',
+    );
+  }
+
+  const record = extractRecord(event);
+  const detection = detect(record);
+
+  // Não casou nenhuma regra → descarta no edge (sem log verboso).
+  if (!detection) {
+    return { skipped: true };
+  }
+
+  const payload = toIngestPayload(record, detection);
+  const rawBody = JSON.stringify(payload);
+
+  const res = await fetch(INGEST_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-argos-signature': sign(rawBody),
+      'x-argos-source-connection-id': CONNECTION_ID,
+    },
+    body: rawBody,
+  });
+
+  // 2xx = aceito (202) ou idempotente. 4xx = problema permanente (não retentar).
+  if (res.ok) {
+    return { sent: true, rule: detection.key, status: res.status };
+  }
+
+  const body = await res.text().catch(() => '');
+
+  if (res.status >= 400 && res.status < 500) {
+    // Assinatura/conexão/payload inválidos — re-tentar não resolve. Loga e encerra.
+    console.error(`[argos] ingestão rejeitada (${res.status}) regra=${detection.key}: ${body}`);
+    return { rejected: true, status: res.status };
+  }
+
+  // 5xx → lança pra o retry assíncrono do Lambda reprocessar (idempotência protege duplicata).
+  throw new Error(`[argos] ingestão falhou (${res.status}): ${body}`);
+}

@@ -1,0 +1,11 @@
+{
+  "name": "argos-connector-aws",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "Connector AWS CloudTrail do Argos — Lambda que filtra eventos de segurança e envia ao endpoint de ingestão (HMAC).",
+  "scripts": {
+    "test": "node --test",
+    "package": "node scripts/package.mjs"
+  }
+}

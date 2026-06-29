@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Argos V2 — connector AWS CloudTrail. Captura eventos de segurança via
+  EventBridge, filtra no edge e envia (assinado com HMAC) ao endpoint de
+  ingestão do Argos. Deploy recomendado em us-east-1 (eventos de console
+  sign-in são globais e emitidos lá).
+
+Parameters:
+  IngestUrl:
+    Type: String
+    Description: Endpoint de ingestão do Argos.
+    Default: https://argos.moreapps.com.br/api/ingest/security-event
+  SourceConnectionId:
+    Type: String
+    Description: UUID da source_connection criada no painel Argos (/admin/sources).
+  HmacSecret:
+    Type: String
+    NoEcho: true
+    Description: Secret HMAC exibido uma única vez ao criar a fonte no painel.
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 128
+    Runtime: nodejs20.x
+
+Resources:
+  ArgosCloudTrailConnector:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: argos-cloudtrail-connector
+      Handler: index.handler
+      CodeUri: src/
+      Description: Filtra eventos CloudTrail e envia ao Argos (HMAC).
+      Environment:
+        Variables:
+          ARGOS_INGEST_URL: !Ref IngestUrl
+          ARGOS_SOURCE_CONNECTION_ID: !Ref SourceConnectionId
+          ARGOS_HMAC_SECRET: !Ref HmacSecret
+      Events:
+        # Console sign-in (root_login, console_login_no_mfa) — eventos globais.
+        ConsoleSignIn:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - aws.signin
+              detail-type:
+                - AWS Console Sign In via CloudTrail
+        # Chamadas de API IAM/S3 (attach admin, S3 público, criação de usuário).
+        IamS3ApiCalls:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - aws.iam
+                - aws.s3
+              detail-type:
+                - AWS API Call via CloudTrail
+              detail:
+                eventName:
+                  - AttachUserPolicy
+                  - AttachRolePolicy
+                  - AttachGroupPolicy
+                  - PutBucketAcl
+                  - PutObjectAcl
+                  - PutBucketPolicy
+                  - CreateLoginProfile
+                  - CreateUser
+
+Outputs:
+  FunctionName:
+    Description: Nome da função Lambda do connector.
+    Value: !Ref ArgosCloudTrailConnector
+  FunctionArn:
+    Description: ARN da função.
+    Value: !GetAtt ArgosCloudTrailConnector.Arn
