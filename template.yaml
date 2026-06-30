@@ -68,6 +68,13 @@ Resources:
                   - PutBucketPolicy
                   - CreateLoginProfile
                   - CreateUser
+        # Heartbeat (liveness): pinga o Argos a cada 15 min mesmo sem evento, pra
+        # o painel distinguir "vivo e quieto" de "offline".
+        Heartbeat:
+          Type: Schedule
+          Properties:
+            Schedule: rate(15 minutes)
+            Description: Heartbeat do connector Argos (prova de vida).
 
 Outputs:
   FunctionName:

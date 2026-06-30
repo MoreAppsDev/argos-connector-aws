@@ -21,6 +21,17 @@ CloudTrail → EventBridge → Lambda (este connector) → POST /api/ingest/secu
 A lógica vive em [`src/detection.mjs`](src/detection.mjs) e é coberta por testes
 (`node --test`). Eventos que não casam nenhuma regra são **descartados no edge**.
 
+## Heartbeat (prova de vida)
+
+Como os eventos de segurança são raros, "silêncio" é o estado normal — mas aí o
+painel não sabe distinguir **vivo e quieto** de **offline**. Por isso o connector
+**pinga o Argos a cada 15 min** (regra agendada `rate(15 minutes)` → o mesmo
+Lambda detecta o disparo agendado e faz `POST /api/ingest/heartbeat`, assinado com
+HMAC). O painel mostra "último sinal há N min" e marca a fonte como **parcial** se
+perder uma batida e **offline** se silenciar de vez. Sem custo relevante (1 invoke
+curtinho a cada 15 min). Connectors antigos (sem esta regra) continuam funcionando
+— só não exibem o sinal de vida até o **redeploy**.
+
 ## Estrutura
 
 ```
@@ -29,30 +40,16 @@ src/
   detection.mjs    # 5 regras + mapeamento CloudTrail → payload
 test/
   detection.test.mjs
-template.yaml      # SAM: Lambda + 2 EventBridge rules
+template.yaml      # SAM: Lambda + 2 EventBridge rules + heartbeat agendado
 deploy.sh          # deploy 1-comando via CloudShell
 scripts/package.mjs# zip pra upload manual no console (alternativa)
 ```
-
-## Permissões IAM (se o usuário não for admin)
-
-O deploy provisiona a stack inteira (CloudFormation/SAM). Usuário **admin** já
-tem tudo. Se for um usuário **restrito**, anexe estas políticas gerenciadas:
-
-| Política | Pra quê |
-|---|---|
-| `AWSCloudShellFullAccess` | Abrir o CloudShell |
-| `AWSCloudFormationFullAccess` | Criar/gerenciar a stack |
-| `AWSLambda_FullAccess` | Criar a função do connector |
-| `AmazonEventBridgeFullAccess` | Criar as regras de captura/filtragem |
-| `IAMFullAccess` | Criar a role `ArgosCloudTrailConnectorRole` |
 
 ## Deploy (recomendado: AWS CloudShell)
 
 > Use **us-east-1** — eventos de console sign-in são globais e emitidos lá.
 > A conta precisa ter um **CloudTrail trail** ativo (multi-region) para os
-> eventos de API fluírem ao EventBridge. Na criação rápida (*Quick create*) o
-> trail já nasce multi-region + management events (gratuito).
+> eventos de API fluírem ao EventBridge.
 
 1. No painel Argos (`/admin/sources`) crie a fonte do tipo **AWS CloudTrail** e
    copie o **UUID da fonte** e o **secret HMAC** (exibido uma única vez).
@@ -60,12 +57,11 @@ tem tudo. Se for um usuário **restrito**, anexe estas políticas gerenciadas:
 3. Traga este connector e rode o deploy:
 
 ```bash
-git clone https://github.com/MoreAppsDev/argos-connector-aws.git
-cd argos-connector-aws
+git clone https://github.com/MoreAppsDev/argos-v2.git
+cd argos-v2/connectors/aws-cloudtrail
 
 export ARGOS_SOURCE_CONNECTION_ID="<uuid da fonte>"
 export ARGOS_HMAC_SECRET="<secret HMAC>"
-chmod +x deploy.sh   # garante permissão de execução
 ./deploy.sh
 ```
 
@@ -88,21 +84,6 @@ Em segundos o evento aparece no dashboard do Argos. Limpe depois:
 aws iam delete-login-profile --user-name argos-smoke-test
 aws iam delete-user --user-name argos-smoke-test
 ```
-
-> O connector roda **independente** na AWS — não precisa deixar o CloudShell
-> aberto. Pode `exit` e fechar a aba; o monitoramento segue ativo.
-
-## Resolução de problemas
-
-- **`Permission denied` ao rodar `./deploy.sh`** → `chmod +x deploy.sh` e tente de novo.
-- **`ROLLBACK_COMPLETE … can not be updated`** → um deploy anterior falhou; limpe a
-  stack, espere ~30s e rode de novo:
-  ```bash
-  aws cloudformation delete-stack --stack-name argos-cloudtrail-connector
-  ```
-- **`AccessDenied` / `not authorized`** → falta permissão IAM (veja a tabela acima).
-- **Fonte fica "aguardando eventos"** → gere um evento que casa uma regra; confira
-  invocações em **Lambda → argos-cloudtrail-connector → Monitor → Logs**.
 
 ## Desenvolvimento
 

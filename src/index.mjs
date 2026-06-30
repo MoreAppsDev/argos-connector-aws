@@ -21,6 +21,9 @@ import { detect, toIngestPayload } from './detection.mjs';
 const INGEST_URL = process.env.ARGOS_INGEST_URL;
 const CONNECTION_ID = process.env.ARGOS_SOURCE_CONNECTION_ID;
 const HMAC_SECRET = process.env.ARGOS_HMAC_SECRET;
+// Endpoint de heartbeat: mesmo host da ingestão, rota /heartbeat. Derivado pra
+// não exigir nova variável de ambiente em deploys já existentes.
+const HEARTBEAT_URL = INGEST_URL ? INGEST_URL.replace(/\/security-event\/?$/, '/heartbeat') : null;
 
 function sign(rawBody) {
   const hex = createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf-8').digest('hex');
@@ -33,12 +36,42 @@ function extractRecord(event) {
   return event;
 }
 
+/** Disparo agendado (rate(...)) = pedido de heartbeat, não um evento CloudTrail. */
+function isHeartbeat(event) {
+  return event?.source === 'aws.events' || event?.['detail-type'] === 'Scheduled Event';
+}
+
+/** Pinga o Argos pra provar que o connector está vivo (liveness). Falha não retenta. */
+async function sendHeartbeat() {
+  if (!HEARTBEAT_URL) return { heartbeat: false, reason: 'sem URL' };
+  const rawBody = JSON.stringify({ sent_at: new Date().toISOString() });
+  const res = await fetch(HEARTBEAT_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-argos-signature': sign(rawBody),
+      'x-argos-source-connection-id': CONNECTION_ID,
+    },
+    body: rawBody,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(`[argos] heartbeat falhou (${res.status}): ${body}`);
+  }
+  return { heartbeat: true, status: res.status };
+}
+
 export async function handler(event) {
   if (!INGEST_URL || !CONNECTION_ID || !HMAC_SECRET) {
     // Config faltando é erro de deploy — falha alto pra aparecer no CloudWatch.
     throw new Error(
       'Connector mal configurado: defina ARGOS_INGEST_URL, ARGOS_SOURCE_CONNECTION_ID e ARGOS_HMAC_SECRET.',
     );
+  }
+
+  // Disparo agendado → heartbeat (não passa pela detecção).
+  if (isHeartbeat(event)) {
+    return sendHeartbeat();
   }
 
   const record = extractRecord(event);
