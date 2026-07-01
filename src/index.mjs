@@ -68,7 +68,9 @@ async function sendPostureScan() {
   return { posture: true, status: res.status };
 }
 
-/** Pinga o Argos pra provar que o connector está vivo (liveness). Falha não retenta. */
+/** Pinga o Argos pra provar que o connector está vivo (liveness). A resposta pode
+ *  pedir uma varredura de postura (pull) — ex.: fonte recém-conectada, ainda sem
+ *  1ª varredura, ou pedido manual do painel. Falha não retenta. */
 async function sendHeartbeat() {
   if (!HEARTBEAT_URL) return { heartbeat: false, reason: 'sem URL' };
   const rawBody = JSON.stringify({ sent_at: new Date().toISOString() });
@@ -84,6 +86,13 @@ async function sendHeartbeat() {
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     console.error(`[argos] heartbeat falhou (${res.status}): ${body}`);
+    return { heartbeat: true, status: res.status };
+  }
+  // O Argos pode pedir uma varredura de postura sob demanda.
+  const reply = await res.json().catch(() => ({}));
+  if (reply?.rescan) {
+    const scan = await sendPostureScan();
+    return { heartbeat: true, status: res.status, rescan: true, scan };
   }
   return { heartbeat: true, status: res.status };
 }
