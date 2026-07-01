@@ -126,7 +126,15 @@ export async function runScan(defaultRegion) {
       const r = await iam.send(new iamm.ListUsersCommand({ Marker: marker, MaxItems: 100 }));
       for (const u of r.Users ?? []) {
         if (count++ >= 300) break;
-        const user = { name: u.UserName, hasConsole: false, mfa: false, accessKeys: [] };
+        const user = {
+          name: u.UserName,
+          hasConsole: false,
+          mfa: false,
+          admin: false,
+          groups: [],
+          policies: [],
+          accessKeys: [],
+        };
         try {
           const mfa = await iam.send(new iamm.ListMFADevicesCommand({ UserName: u.UserName }));
           user.mfa = (mfa.MFADevices ?? []).length > 0;
@@ -134,6 +142,19 @@ export async function runScan(defaultRegion) {
         try {
           await iam.send(new iamm.GetLoginProfileCommand({ UserName: u.UserName }));
           user.hasConsole = true;
+        } catch {}
+        try {
+          const pol = await iam.send(
+            new iamm.ListAttachedUserPoliciesCommand({ UserName: u.UserName }),
+          );
+          user.policies = (pol.AttachedPolicies ?? []).map((p) => p.PolicyName).filter(Boolean);
+          user.admin = user.policies.some(
+            (p) => p === 'AdministratorAccess' || p === 'IAMFullAccess',
+          );
+        } catch {}
+        try {
+          const grp = await iam.send(new iamm.ListGroupsForUserCommand({ UserName: u.UserName }));
+          user.groups = (grp.Groups ?? []).map((g) => g.GroupName).filter(Boolean);
         } catch {}
         try {
           const keys = await iam.send(new iamm.ListAccessKeysCommand({ UserName: u.UserName }));
