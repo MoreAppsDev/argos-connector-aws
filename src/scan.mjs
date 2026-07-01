@@ -1,14 +1,15 @@
 /**
- * Argos V2 — Varredura de postura (Tema O, Fase 2).
+ * Argos V2 — Varredura de postura (Tema O, Fase 2) — MULTI-REGIÃO.
  *
  * Enumera o estado ATUAL da conta AWS via APIs read-only (SecurityAudit) e monta
- * um inventário normalizado. O connector só COLETA fatos; quem calcula risco/score
- * é o Argos (lib/posture/risk.ts) — assim a inteligência evolui sem redeploy.
+ * um inventário normalizado. Recursos de rede/compute/kms/trilha são POR REGIÃO
+ * (datacenter) — então varremos TODAS as regiões habilitadas e marcamos `region`
+ * em cada recurso. IAM e S3 (list) são globais. O connector só COLETA; quem calcula
+ * risco/score é o Argos (lib/posture/risk.ts).
  *
- * O AWS SDK v3 já vem no runtime do Lambda (nodejs20). Os imports são DINÂMICOS
- * (dentro de runScan) pra manter os normalizadores puros testáveis localmente sem
- * o SDK instalado. Cada seção é best-effort (try/catch): uma lacuna de permissão
- * não derruba a varredura inteira — inventário parcial ainda vale.
+ * AWS SDK v3 vem no runtime (nodejs20); imports DINÂMICOS (normalizadores puros
+ * testáveis sem SDK). Cada seção é best-effort — região sem opt-in/permite lança e
+ * é ignorada, o resto do inventário continua.
  */
 
 // ── normalizadores PUROS (sem SDK — testáveis) ───────────────────────────────
@@ -34,7 +35,6 @@ export function sgOpenToWorld(sg) {
     const from = Number(perm.FromPort);
     const to = Number(perm.ToPort ?? perm.FromPort);
     if (!Number.isFinite(from)) continue;
-    // range largo aberto ao mundo ≈ "todas as portas"; range pequeno vira portas discretas.
     if (to - from > 20) {
       out.push({ port: 'all', protocol, ipv6 });
     } else {
@@ -49,16 +49,25 @@ function ageDays(date) {
   return Math.floor((Date.now() - new Date(date).getTime()) / 86_400_000);
 }
 
+// Fallback de regiões se DescribeRegions falhar.
+const FALLBACK_REGIONS = [
+  'us-east-1',
+  'us-east-2',
+  'us-west-1',
+  'us-west-2',
+  'sa-east-1',
+  'eu-west-1',
+  'eu-central-1',
+  'ca-central-1',
+];
+
 // ── varredura (usa o SDK, só roda no Lambda) ─────────────────────────────────
 
-/**
- * Roda a varredura read-only e devolve o inventário normalizado (PostureInventory).
- * @param {string} [region]
- */
-export async function runScan(region) {
+export async function runScan(defaultRegion) {
   const inv = {
     account_id: null,
-    region: region ?? null,
+    account_alias: null,
+    region: defaultRegion ?? null,
     instances: [],
     security_groups: [],
     vpcs: [],
@@ -67,6 +76,7 @@ export async function runScan(region) {
     root: null,
     kms_keys: [],
     trails: [],
+    regions_scanned: [],
   };
 
   const [ec2m, s3m, iamm, ctm, kmsm, stsm] = await Promise.all([
@@ -78,96 +88,22 @@ export async function runScan(region) {
     import('@aws-sdk/client-sts'),
   ]);
 
-  const ec2 = new ec2m.EC2Client({});
-  const s3 = new s3m.S3Client({ region: region ?? 'us-east-1' });
+  const base = defaultRegion ?? 'us-east-1';
   const iam = new iamm.IAMClient({});
-  const ct = new ctm.CloudTrailClient({});
-  const kms = new kmsm.KMSClient({});
+  const s3 = new s3m.S3Client({ region: base });
   const sts = new stsm.STSClient({});
 
-  // identidade da conta
+  // ── conta (id + alias/nome) ────────────────────────────────────────────────
   try {
     const id = await sts.send(new stsm.GetCallerIdentityCommand({}));
     inv.account_id = id.Account ?? null;
   } catch {}
-
-  // EC2: instâncias
   try {
-    let token;
-    do {
-      const r = await ec2.send(new ec2m.DescribeInstancesCommand({ NextToken: token, MaxResults: 200 }));
-      for (const res of r.Reservations ?? []) {
-        for (const i of res.Instances ?? []) {
-          inv.instances.push({
-            id: i.InstanceId,
-            name: tagName(i.Tags),
-            state: i.State?.Name ?? null,
-            publicIp: i.PublicIpAddress ?? null,
-            privateIp: i.PrivateIpAddress ?? null,
-            type: i.InstanceType ?? null,
-            az: i.Placement?.AvailabilityZone ?? null,
-            vpcId: i.VpcId ?? null,
-            securityGroups: (i.SecurityGroups ?? []).map((g) => g.GroupId),
-          });
-        }
-      }
-      token = r.NextToken;
-    } while (token);
-  } catch (e) {
-    console.error('[argos] scan EC2 instances:', e?.name);
-  }
+    const al = await iam.send(new iamm.ListAccountAliasesCommand({}));
+    inv.account_alias = (al.AccountAliases ?? [])[0] ?? null;
+  } catch {}
 
-  // EC2: security groups
-  try {
-    let token;
-    do {
-      const r = await ec2.send(new ec2m.DescribeSecurityGroupsCommand({ NextToken: token, MaxResults: 500 }));
-      for (const sg of r.SecurityGroups ?? []) {
-        inv.security_groups.push({
-          id: sg.GroupId,
-          name: sg.GroupName ?? null,
-          vpcId: sg.VpcId ?? null,
-          openToWorld: sgOpenToWorld(sg),
-        });
-      }
-      token = r.NextToken;
-    } while (token);
-  } catch (e) {
-    console.error('[argos] scan security groups:', e?.name);
-  }
-
-  // EC2: VPCs
-  try {
-    const r = await ec2.send(new ec2m.DescribeVpcsCommand({}));
-    for (const v of r.Vpcs ?? []) {
-      inv.vpcs.push({ id: v.VpcId, cidr: v.CidrBlock ?? null, isDefault: Boolean(v.IsDefault) });
-    }
-  } catch (e) {
-    console.error('[argos] scan VPCs:', e?.name);
-  }
-
-  // S3: buckets + público + criptografia (best-effort, limitado)
-  try {
-    const list = await s3.send(new s3m.ListBucketsCommand({}));
-    for (const b of (list.Buckets ?? []).slice(0, 150)) {
-      const entry = { name: b.Name, public: false, encrypted: null };
-      try {
-        const ps = await s3.send(new s3m.GetBucketPolicyStatusCommand({ Bucket: b.Name }));
-        if (ps.PolicyStatus?.IsPublic) entry.public = true;
-      } catch {}
-      try {
-        await s3.send(new s3m.GetBucketEncryptionCommand({ Bucket: b.Name }));
-        entry.encrypted = true;
-      } catch (e) {
-        if (e?.name === 'ServerSideEncryptionConfigurationNotFoundError') entry.encrypted = false;
-      }
-      inv.buckets.push(entry);
-    }
-  } catch (e) {
-    console.error('[argos] scan S3:', e?.name);
-  }
-
-  // IAM: root (via account summary) + usuários (MFA, console, access keys)
+  // ── IAM global: root + usuários ────────────────────────────────────────────
   try {
     const s = await iam.send(new iamm.GetAccountSummaryCommand({}));
     const m = s.SummaryMap ?? {};
@@ -196,7 +132,9 @@ export async function runScan(region) {
           for (const k of keys.AccessKeyMetadata ?? []) {
             let lastUsedDays = null;
             try {
-              const lu = await iam.send(new iamm.GetAccessKeyLastUsedCommand({ AccessKeyId: k.AccessKeyId }));
+              const lu = await iam.send(
+                new iamm.GetAccessKeyLastUsedCommand({ AccessKeyId: k.AccessKeyId }),
+              );
               const d = lu.AccessKeyLastUsed?.LastUsedDate;
               lastUsedDays = d ? ageDays(d) : null;
             } catch {}
@@ -216,38 +154,137 @@ export async function runScan(region) {
     console.error('[argos] scan IAM users:', e?.name);
   }
 
-  // CloudTrail: trilhas + status
+  // ── S3 global: buckets + público + criptografia ────────────────────────────
   try {
-    const r = await ct.send(new ctm.DescribeTrailsCommand({}));
-    for (const t of r.trailList ?? []) {
-      let isLogging = false;
+    const list = await s3.send(new s3m.ListBucketsCommand({}));
+    for (const b of (list.Buckets ?? []).slice(0, 200)) {
+      const entry = { name: b.Name, public: false, encrypted: null };
       try {
-        const st = await ct.send(new ctm.GetTrailStatusCommand({ Name: t.TrailARN ?? t.Name }));
-        isLogging = Boolean(st.IsLogging);
+        const ps = await s3.send(new s3m.GetBucketPolicyStatusCommand({ Bucket: b.Name }));
+        if (ps.PolicyStatus?.IsPublic) entry.public = true;
       } catch {}
-      inv.trails.push({
-        name: t.Name,
-        isLogging,
-        multiRegion: Boolean(t.IsMultiRegionTrail),
-      });
+      try {
+        await s3.send(new s3m.GetBucketEncryptionCommand({ Bucket: b.Name }));
+        entry.encrypted = true;
+      } catch (e) {
+        if (e?.name === 'ServerSideEncryptionConfigurationNotFoundError') entry.encrypted = false;
+      }
+      inv.buckets.push(entry);
     }
   } catch (e) {
-    console.error('[argos] scan CloudTrail:', e?.name);
+    console.error('[argos] scan S3:', e?.name);
   }
 
-  // KMS: chaves gerenciadas pelo cliente + estado (limitado)
+  // ── descobre as regiões habilitadas ────────────────────────────────────────
+  let regions = [];
   try {
-    const r = await kms.send(new kmsm.ListKeysCommand({ Limit: 150 }));
-    for (const k of r.Keys ?? []) {
-      try {
-        const d = await kms.send(new kmsm.DescribeKeyCommand({ KeyId: k.KeyId }));
-        if (d.KeyMetadata?.KeyManager === 'AWS') continue; // ignora chaves gerenciadas pela AWS
-        inv.kms_keys.push({ id: k.KeyId, state: d.KeyMetadata?.KeyState ?? 'unknown' });
-      } catch {}
-    }
+    const ec2base = new ec2m.EC2Client({ region: base });
+    const rr = await ec2base.send(new ec2m.DescribeRegionsCommand({}));
+    regions = (rr.Regions ?? []).map((x) => x.RegionName).filter(Boolean);
   } catch (e) {
-    console.error('[argos] scan KMS:', e?.name);
+    console.error('[argos] describeRegions:', e?.name);
   }
+  if (regions.length === 0) regions = FALLBACK_REGIONS;
+  inv.regions_scanned = regions;
+
+  const seenTrails = new Set();
+
+  // ── varre CADA região (EC2/KMS/CloudTrail) em paralelo, best-effort ─────────
+  await Promise.all(
+    regions.map(async (region) => {
+      // EC2: instâncias, security groups, VPCs
+      try {
+        const ec2 = new ec2m.EC2Client({ region });
+        let token;
+        do {
+          const r = await ec2.send(
+            new ec2m.DescribeInstancesCommand({ NextToken: token, MaxResults: 200 }),
+          );
+          for (const res of r.Reservations ?? []) {
+            for (const i of res.Instances ?? []) {
+              inv.instances.push({
+                id: i.InstanceId,
+                name: tagName(i.Tags),
+                region,
+                state: i.State?.Name ?? null,
+                publicIp: i.PublicIpAddress ?? null,
+                privateIp: i.PrivateIpAddress ?? null,
+                type: i.InstanceType ?? null,
+                az: i.Placement?.AvailabilityZone ?? null,
+                vpcId: i.VpcId ?? null,
+                securityGroups: (i.SecurityGroups ?? []).map((g) => g.GroupId),
+              });
+            }
+          }
+          token = r.NextToken;
+        } while (token);
+
+        let t2;
+        do {
+          const r = await ec2.send(
+            new ec2m.DescribeSecurityGroupsCommand({ NextToken: t2, MaxResults: 500 }),
+          );
+          for (const sg of r.SecurityGroups ?? []) {
+            inv.security_groups.push({
+              id: sg.GroupId,
+              name: sg.GroupName ?? null,
+              region,
+              vpcId: sg.VpcId ?? null,
+              openToWorld: sgOpenToWorld(sg),
+            });
+          }
+          t2 = r.NextToken;
+        } while (t2);
+
+        const rv = await ec2.send(new ec2m.DescribeVpcsCommand({}));
+        for (const v of rv.Vpcs ?? []) {
+          inv.vpcs.push({
+            id: v.VpcId,
+            region,
+            cidr: v.CidrBlock ?? null,
+            isDefault: Boolean(v.IsDefault),
+          });
+        }
+      } catch {
+        // região sem opt-in / sem permissão — ignora
+      }
+
+      // KMS por região
+      try {
+        const kms = new kmsm.KMSClient({ region });
+        const r = await kms.send(new kmsm.ListKeysCommand({ Limit: 200 }));
+        for (const k of r.Keys ?? []) {
+          try {
+            const d = await kms.send(new kmsm.DescribeKeyCommand({ KeyId: k.KeyId }));
+            if (d.KeyMetadata?.KeyManager === 'AWS') continue;
+            inv.kms_keys.push({ id: k.KeyId, region, state: d.KeyMetadata?.KeyState ?? 'unknown' });
+          } catch {}
+        }
+      } catch {}
+
+      // CloudTrail por região (dedupe multi-region por ARN)
+      try {
+        const ct = new ctm.CloudTrailClient({ region });
+        const r = await ct.send(new ctm.DescribeTrailsCommand({}));
+        for (const t of r.trailList ?? []) {
+          const arn = t.TrailARN ?? t.Name;
+          if (seenTrails.has(arn)) continue;
+          seenTrails.add(arn);
+          let isLogging = false;
+          try {
+            const st = await ct.send(new ctm.GetTrailStatusCommand({ Name: arn }));
+            isLogging = Boolean(st.IsLogging);
+          } catch {}
+          inv.trails.push({
+            name: t.Name,
+            region: t.HomeRegion ?? region,
+            isLogging,
+            multiRegion: Boolean(t.IsMultiRegionTrail),
+          });
+        }
+      } catch {}
+    }),
+  );
 
   return inv;
 }
