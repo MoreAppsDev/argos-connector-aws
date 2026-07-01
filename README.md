@@ -17,6 +17,10 @@ CloudTrail → EventBridge → Lambda (este connector) → POST /api/ingest/secu
 | `iam_attach_admin_policy` | `Attach*Policy` com `AdministratorAccess`/`IAMFullAccess` | 8 |
 | `s3_public_acl` | `PutBucketAcl`/`PutObjectAcl`/`PutBucketPolicy` com grant público | 8 |
 | `iam_no_mfa` | `CreateUser` / `CreateLoginProfile` | 5 |
+| `cloudtrail_tamper` | `StopLogging`/`DeleteTrail`/`UpdateTrail` (cobrir rastros) | 9 |
+| `kms_key_destruction` | `DisableKey`/`ScheduleKeyDeletion` | 9/8 |
+| `security_group_open_world` | `AuthorizeSecurityGroupIngress` porta sensível → `0.0.0.0/0` | 8 |
+| `iam_access_key_created` | `CreateAccessKey` (persistência) | 6/7 |
 
 A lógica vive em [`src/detection.mjs`](src/detection.mjs) e é coberta por testes
 (`node --test`). Eventos que não casam nenhuma regra são **descartados no edge**.

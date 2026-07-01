@@ -47,9 +47,53 @@ function paramsText(record) {
   }
 }
 
+// Portas cuja exposição a 0.0.0.0/0 é perigosa (admin/bancos/serviços internos).
+// 80/443 ficam de fora de propósito — servidor web público é normal.
+const SENSITIVE_PORTS = new Set([
+  21, 22, 23, 135, 139, 445, 1433, 1521, 3306, 3389, 5432, 5900, 6379, 9200, 11211, 27017,
+]);
+const ADMIN_PORTS = new Set([22, 3389]); // SSH / RDP — os mais críticos
+
+/** CloudTrail ora entrega listas como array cru, ora como { items: [...] }. */
+function toArray(x) {
+  if (!x) return [];
+  if (Array.isArray(x)) return x;
+  if (Array.isArray(x.items)) return x.items;
+  return [x];
+}
+
 /**
- * As 5 regras iniciais da Fase 2. Cada uma recebe o registro CloudTrail e
- * devolve uma Detection (match) ou null.
+ * Analisa um AuthorizeSecurityGroupIngress: retorna as portas sensíveis abertas
+ * ao mundo (0.0.0.0/0 ou ::/0) e se é "todas as portas". null se não abre nada
+ * relevante ao mundo.
+ */
+function openToWorldIngress(r) {
+  const perms = toArray(r.requestParameters?.ipPermissions);
+  let allPorts = false;
+  const ports = [];
+  let world = false;
+  for (const p of perms) {
+    const v4 = toArray(p.ipRanges).some((x) => x?.cidrIp === '0.0.0.0/0');
+    const v6 = toArray(p.ipv6Ranges).some((x) => x?.cidrIpv6 === '::/0');
+    if (!v4 && !v6) continue;
+    world = true;
+    if (String(p.ipProtocol ?? '') === '-1') {
+      allPorts = true;
+      continue;
+    }
+    const from = Number(p.fromPort);
+    const to = Number(p.toPort);
+    if (Number.isFinite(from) && Number.isFinite(to)) {
+      for (const port of SENSITIVE_PORTS) if (port >= from && port <= to) ports.push(port);
+    }
+  }
+  if (!world) return null;
+  return { allPorts, ports };
+}
+
+/**
+ * Catálogo de regras de detecção. Cada uma recebe o registro CloudTrail e
+ * devolve uma Detection (match) ou null. `detect()` escolhe a de maior severidade.
  */
 const RULES = [
   // root_login — uso da conta root no console (deveria ser raríssimo).
@@ -134,6 +178,70 @@ const RULES = [
       severity: 5,
       actor: actorOf(r),
       target: r.requestParameters?.userName ?? null,
+      action: r.eventName,
+    };
+  },
+
+  // cloudtrail_tamper — mexer na auditoria (desligar/apagar trilha) = cobrir rastros.
+  function cloudtrailTamper(r) {
+    const sev = { StopLogging: 9, DeleteTrail: 9, UpdateTrail: 7 }[r.eventName];
+    if (!sev) return null;
+    return {
+      key: 'cloudtrail_tamper',
+      title: 'Auditoria CloudTrail desligada/alterada',
+      severity: sev,
+      actor: actorOf(r),
+      target: r.requestParameters?.name ?? r.requestParameters?.trailName ?? null,
+      action: r.eventName,
+    };
+  },
+
+  // security_group_open_world — porta sensível aberta à internet (0.0.0.0/0).
+  function securityGroupOpenWorld(r) {
+    if (r.eventName !== 'AuthorizeSecurityGroupIngress') return null;
+    const res = openToWorldIngress(r);
+    if (!res) return null;
+    const adminHit = res.ports.some((p) => ADMIN_PORTS.has(p));
+    // 0.0.0.0/0 em porta NÃO sensível (ex.: 443) não vira evento — menos ruído.
+    const severity = res.allPorts ? 9 : adminHit ? 8 : res.ports.length ? 7 : null;
+    if (severity === null) return null;
+    return {
+      key: 'security_group_open_world',
+      title: 'Porta exposta à internet (0.0.0.0/0)',
+      severity,
+      actor: actorOf(r),
+      target: r.requestParameters?.groupId ?? null,
+      action: r.eventName,
+    };
+  },
+
+  // kms_key_destruction — desabilitar/agendar exclusão de chave KMS (destruição).
+  function kmsKeyDestruction(r) {
+    const sev = { ScheduleKeyDeletion: 9, DisableKey: 8 }[r.eventName];
+    if (!sev) return null;
+    return {
+      key: 'kms_key_destruction',
+      title: 'Chave KMS desabilitada/agendada p/ exclusão',
+      severity: sev,
+      actor: actorOf(r),
+      target: r.requestParameters?.keyId ?? null,
+      action: r.eventName,
+    };
+  },
+
+  // iam_access_key_created — nova chave de acesso (credencial de longa duração =
+  // persistência). Criar chave PRA OUTRO usuário é mais suspeito que pra si mesmo.
+  function iamAccessKeyCreated(r) {
+    if (r.eventName !== 'CreateAccessKey') return null;
+    const actor = actorOf(r);
+    const forUser = r.requestParameters?.userName ?? null;
+    const forOther = Boolean(forUser && actor && forUser !== actor);
+    return {
+      key: 'iam_access_key_created',
+      title: 'Nova chave de acesso IAM criada',
+      severity: forOther ? 7 : 6,
+      actor,
+      target: forUser ?? actor,
       action: r.eventName,
     };
   },

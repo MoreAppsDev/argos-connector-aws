@@ -48,26 +48,43 @@ Resources:
                 - aws.signin
               detail-type:
                 - AWS Console Sign In via CloudTrail
-        # Chamadas de API IAM/S3 (attach admin, S3 público, criação de usuário).
-        IamS3ApiCalls:
+        # Chamadas de API de segurança (IAM/S3/EC2/KMS/CloudTrail). O EventBridge
+        # casa (source ∈ lista) E (eventName ∈ lista) — como os nomes de evento são
+        # únicos por serviço, uma regra só cobre todos sem cruzar indevidamente.
+        SecurityApiCalls:
           Type: EventBridgeRule
           Properties:
             Pattern:
               source:
                 - aws.iam
                 - aws.s3
+                - aws.ec2
+                - aws.kms
+                - aws.cloudtrail
               detail-type:
                 - AWS API Call via CloudTrail
               detail:
                 eventName:
+                  # IAM — escalonamento / persistência
                   - AttachUserPolicy
                   - AttachRolePolicy
                   - AttachGroupPolicy
+                  - CreateLoginProfile
+                  - CreateUser
+                  - CreateAccessKey
+                  # S3 — exposição pública
                   - PutBucketAcl
                   - PutObjectAcl
                   - PutBucketPolicy
-                  - CreateLoginProfile
-                  - CreateUser
+                  # EC2 — porta aberta ao mundo
+                  - AuthorizeSecurityGroupIngress
+                  # KMS — destruição de chave
+                  - DisableKey
+                  - ScheduleKeyDeletion
+                  # CloudTrail — cobrir rastros (desligar auditoria)
+                  - StopLogging
+                  - DeleteTrail
+                  - UpdateTrail
         # Heartbeat (liveness): pinga o Argos a cada 15 min mesmo sem evento, pra
         # o painel distinguir "vivo e quieto" de "offline".
         Heartbeat:

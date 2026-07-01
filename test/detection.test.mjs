@@ -107,6 +107,116 @@ test('evento benigno → descartado (null)', () => {
   assert.equal(detect(benign), null);
 });
 
+const stopLogging = {
+  eventID: 'g7-stoplog',
+  eventTime: '2026-06-30T10:00:00Z',
+  eventName: 'StopLogging',
+  eventSource: 'cloudtrail.amazonaws.com',
+  userIdentity: { type: 'IAMUser', userName: 'intruso' },
+  requestParameters: { name: 'org-trail' },
+};
+
+const sgOpenSsh = {
+  eventID: 'h8-sg',
+  eventTime: '2026-06-30T10:05:00Z',
+  eventName: 'AuthorizeSecurityGroupIngress',
+  eventSource: 'ec2.amazonaws.com',
+  userIdentity: { type: 'IAMUser', userName: 'devops' },
+  requestParameters: {
+    groupId: 'sg-0abc123',
+    ipPermissions: {
+      items: [
+        { ipProtocol: 'tcp', fromPort: 22, toPort: 22, ipRanges: { items: [{ cidrIp: '0.0.0.0/0' }] } },
+      ],
+    },
+  },
+};
+
+const sgOpenHttps = {
+  eventID: 'h9-sg-ok',
+  eventTime: '2026-06-30T10:06:00Z',
+  eventName: 'AuthorizeSecurityGroupIngress',
+  eventSource: 'ec2.amazonaws.com',
+  userIdentity: { type: 'IAMUser', userName: 'devops' },
+  requestParameters: {
+    groupId: 'sg-web',
+    ipPermissions: {
+      items: [
+        { ipProtocol: 'tcp', fromPort: 443, toPort: 443, ipRanges: { items: [{ cidrIp: '0.0.0.0/0' }] } },
+      ],
+    },
+  },
+};
+
+const sgSshFromOffice = {
+  eventID: 'h10-sg-office',
+  eventTime: '2026-06-30T10:07:00Z',
+  eventName: 'AuthorizeSecurityGroupIngress',
+  eventSource: 'ec2.amazonaws.com',
+  userIdentity: { type: 'IAMUser', userName: 'devops' },
+  requestParameters: {
+    groupId: 'sg-0abc123',
+    ipPermissions: {
+      items: [
+        { ipProtocol: 'tcp', fromPort: 22, toPort: 22, ipRanges: { items: [{ cidrIp: '203.0.113.5/32' }] } },
+      ],
+    },
+  },
+};
+
+const kmsDelete = {
+  eventID: 'i11-kms',
+  eventTime: '2026-06-30T10:10:00Z',
+  eventName: 'ScheduleKeyDeletion',
+  eventSource: 'kms.amazonaws.com',
+  userIdentity: { type: 'IAMUser', userName: 'intruso' },
+  requestParameters: { keyId: 'key-abc' },
+};
+
+const accessKeyForOther = {
+  eventID: 'j12-key',
+  eventTime: '2026-06-30T10:12:00Z',
+  eventName: 'CreateAccessKey',
+  eventSource: 'iam.amazonaws.com',
+  userIdentity: { type: 'IAMUser', userName: 'intruso' },
+  requestParameters: { userName: 'ceo' },
+};
+
+test('StopLogging → cloudtrail_tamper sev 9', () => {
+  const d = detect(stopLogging);
+  assert.equal(d?.key, 'cloudtrail_tamper');
+  assert.equal(d.severity, 9);
+  assert.equal(d.target, 'org-trail');
+});
+
+test('SSH aberto ao mundo → security_group_open_world sev 8', () => {
+  const d = detect(sgOpenSsh);
+  assert.equal(d?.key, 'security_group_open_world');
+  assert.equal(d.severity, 8);
+  assert.equal(d.target, 'sg-0abc123');
+});
+
+test('443 aberto ao mundo → ignorado (porta pública normal)', () => {
+  assert.equal(detect(sgOpenHttps), null);
+});
+
+test('SSH liberado só pra um IP → ignorado (não é 0.0.0.0/0)', () => {
+  assert.equal(detect(sgSshFromOffice), null);
+});
+
+test('ScheduleKeyDeletion → kms_key_destruction sev 9', () => {
+  const d = detect(kmsDelete);
+  assert.equal(d?.key, 'kms_key_destruction');
+  assert.equal(d.severity, 9);
+});
+
+test('CreateAccessKey pra outro usuário → iam_access_key_created sev 7', () => {
+  const d = detect(accessKeyForOther);
+  assert.equal(d?.key, 'iam_access_key_created');
+  assert.equal(d.severity, 7);
+  assert.equal(d.target, 'ceo');
+});
+
 test('payload de ingestão mapeia eventID e raw', () => {
   const d = detect(rootLogin);
   const p = toIngestPayload(rootLogin, d);
