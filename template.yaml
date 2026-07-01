@@ -33,6 +33,13 @@ Resources:
       Handler: index.handler
       CodeUri: src/
       Description: Filtra eventos CloudTrail e envia ao Argos (HMAC).
+      # A varredura de postura enumera a conta (mais chamadas) → mais tempo/memória.
+      Timeout: 120
+      MemorySize: 256
+      # SecurityAudit = política gerenciada READ-ONLY (describe/list/get). Sem
+      # permissão de escrita — o connector nunca altera nada na conta do cliente.
+      Policies:
+        - arn:aws:iam::aws:policy/SecurityAudit
       Environment:
         Variables:
           ARGOS_INGEST_URL: !Ref IngestUrl
@@ -92,6 +99,14 @@ Resources:
           Properties:
             Schedule: rate(15 minutes)
             Description: Heartbeat do connector Argos (prova de vida).
+        # Varredura de postura (Tema O): 1x/dia enumera a conta (read-only) e
+        # manda o snapshot. Input marca o disparo pra distinguir do heartbeat.
+        PostureScan:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+            Description: Varredura de postura do Argos (CSPM read-only).
+            Input: '{"argos":"scan"}'
 
 Outputs:
   FunctionName:

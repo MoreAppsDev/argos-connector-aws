@@ -17,13 +17,14 @@
 import { createHmac } from 'node:crypto';
 
 import { detect, toIngestPayload } from './detection.mjs';
+import { runScan } from './scan.mjs';
 
 const INGEST_URL = process.env.ARGOS_INGEST_URL;
 const CONNECTION_ID = process.env.ARGOS_SOURCE_CONNECTION_ID;
 const HMAC_SECRET = process.env.ARGOS_HMAC_SECRET;
-// Endpoint de heartbeat: mesmo host da ingestão, rota /heartbeat. Derivado pra
-// não exigir nova variável de ambiente em deploys já existentes.
+// Endpoints derivados do host da ingestão (sem exigir novas env vars).
 const HEARTBEAT_URL = INGEST_URL ? INGEST_URL.replace(/\/security-event\/?$/, '/heartbeat') : null;
+const POSTURE_URL = INGEST_URL ? INGEST_URL.replace(/\/security-event\/?$/, '/posture') : null;
 
 function sign(rawBody) {
   const hex = createHmac('sha256', HMAC_SECRET).update(rawBody, 'utf-8').digest('hex');
@@ -36,9 +37,35 @@ function extractRecord(event) {
   return event;
 }
 
+/** Disparo agendado da varredura de postura (marcado via Input do EventBridge). */
+function isScan(event) {
+  return event?.argos === 'scan';
+}
+
 /** Disparo agendado (rate(...)) = pedido de heartbeat, não um evento CloudTrail. */
 function isHeartbeat(event) {
   return event?.source === 'aws.events' || event?.['detail-type'] === 'Scheduled Event';
+}
+
+/** Varre a conta (read-only) e envia o snapshot de postura ao Argos. */
+async function sendPostureScan() {
+  if (!POSTURE_URL) return { posture: false, reason: 'sem URL' };
+  const inventory = await runScan(process.env.AWS_REGION);
+  const rawBody = JSON.stringify({ captured_at: new Date().toISOString(), inventory });
+  const res = await fetch(POSTURE_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-argos-signature': sign(rawBody),
+      'x-argos-source-connection-id': CONNECTION_ID,
+    },
+    body: rawBody,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.error(`[argos] postura falhou (${res.status}): ${body}`);
+  }
+  return { posture: true, status: res.status };
 }
 
 /** Pinga o Argos pra provar que o connector está vivo (liveness). Falha não retenta. */
@@ -67,6 +94,11 @@ export async function handler(event) {
     throw new Error(
       'Connector mal configurado: defina ARGOS_INGEST_URL, ARGOS_SOURCE_CONNECTION_ID e ARGOS_HMAC_SECRET.',
     );
+  }
+
+  // Disparo agendado de varredura de postura (marcado) → varre e envia.
+  if (isScan(event)) {
+    return sendPostureScan();
   }
 
   // Disparo agendado → heartbeat (não passa pela detecção).

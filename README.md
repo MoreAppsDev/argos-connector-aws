@@ -25,6 +25,17 @@ CloudTrail → EventBridge → Lambda (este connector) → POST /api/ingest/secu
 A lógica vive em [`src/detection.mjs`](src/detection.mjs) e é coberta por testes
 (`node --test`). Eventos que não casam nenhuma regra são **descartados no edge**.
 
+## Varredura de postura (CSPM read-only)
+
+Além de reagir a eventos, o connector tira **1x/dia** uma foto do estado atual da
+conta usando **APIs read-only** (`describe-security-groups`, `describe-instances`,
+S3 público, IAM+MFA+access keys, CloudTrail, KMS) e envia um snapshot pro Argos
+(`POST /api/ingest/posture`), que calcula um **score de risco** e os achados
+(porta aberta ao mundo, bucket público, sem MFA, sem auditoria…). O template
+concede a política gerenciada **`SecurityAudit`** — só leitura, o connector nunca
+altera nada. Lógica em [`src/scan.mjs`](src/scan.mjs) (usa o AWS SDK v3 já embutido
+no runtime nodejs20). É a base do mapa de risco/relatório (Tema O).
+
 ## Heartbeat (prova de vida)
 
 Como os eventos de segurança são raros, "silêncio" é o estado normal — mas aí o
