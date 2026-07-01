@@ -72,6 +72,8 @@ export async function runScan(defaultRegion) {
     security_groups: [],
     vpcs: [],
     buckets: [],
+    databases: [],
+    lightsail: [],
     iam_users: [],
     root: null,
     kms_keys: [],
@@ -79,13 +81,15 @@ export async function runScan(defaultRegion) {
     regions_scanned: [],
   };
 
-  const [ec2m, s3m, iamm, ctm, kmsm, stsm] = await Promise.all([
+  const [ec2m, s3m, iamm, ctm, kmsm, stsm, rdsm, lsm] = await Promise.all([
     import('@aws-sdk/client-ec2'),
     import('@aws-sdk/client-s3'),
     import('@aws-sdk/client-iam'),
     import('@aws-sdk/client-cloudtrail'),
     import('@aws-sdk/client-kms'),
     import('@aws-sdk/client-sts'),
+    import('@aws-sdk/client-rds'),
+    import('@aws-sdk/client-lightsail'),
   ]);
 
   const base = defaultRegion ?? 'us-east-1';
@@ -306,6 +310,74 @@ export async function runScan(defaultRegion) {
             multiRegion: Boolean(t.IsMultiRegionTrail),
           });
         }
+      } catch {}
+
+      // RDS: bancos de dados por região (público? criptografado?)
+      try {
+        const rds = new rdsm.RDSClient({ region });
+        let marker;
+        do {
+          const r = await rds.send(
+            new rdsm.DescribeDBInstancesCommand({ Marker: marker, MaxRecords: 100 }),
+          );
+          for (const db of r.DBInstances ?? []) {
+            inv.databases.push({
+              id: db.DBInstanceIdentifier,
+              engine: db.Engine ?? null,
+              version: db.EngineVersion ?? null,
+              class: db.DBInstanceClass ?? null,
+              storageGB: db.AllocatedStorage ?? null,
+              publicAccess: Boolean(db.PubliclyAccessible),
+              encrypted: db.StorageEncrypted ?? null,
+              multiAz: Boolean(db.MultiAZ),
+              endpoint: db.Endpoint?.Address ?? null,
+              region,
+              az: db.AvailabilityZone ?? null,
+              status: db.DBInstanceStatus ?? null,
+            });
+          }
+          marker = r.Marker;
+        } while (marker);
+      } catch {}
+
+      // Lightsail: instâncias (VPS) por região — portas abertas ao mundo
+      try {
+        const ls = new lsm.LightsailClient({ region });
+        let pageToken;
+        do {
+          const r = await ls.send(new lsm.GetInstancesCommand({ pageToken }));
+          for (const li of r.instances ?? []) {
+            const ports = [];
+            for (const p of li.networking?.ports ?? []) {
+              const world =
+                (p.cidrs ?? []).includes('0.0.0.0/0') || (p.ipv6Cidrs ?? []).includes('::/0');
+              if (!world) continue;
+              const from = Number(p.fromPort);
+              const to = Number(p.toPort ?? p.fromPort);
+              if (!Number.isFinite(from) || to - from > 20) {
+                ports.push('all');
+              } else {
+                for (let x = from; x <= to; x++) ports.push(x);
+              }
+            }
+            const openPorts = ports.includes('all') ? ['all'] : [...new Set(ports)];
+            inv.lightsail.push({
+              name: li.name,
+              region,
+              az: li.location?.availabilityZone ?? null,
+              state: li.state?.name ?? null,
+              publicIp: li.publicIpAddress ?? null,
+              privateIp: li.privateIpAddress ?? null,
+              os: li.blueprintName ?? null,
+              bundle: li.bundleId ?? null,
+              vcpu: li.hardware?.cpuCount ?? null,
+              ramGB: li.hardware?.ramSizeInGb ?? null,
+              diskGB: (li.hardware?.disks ?? []).reduce((s, d) => s + (d.sizeInGb ?? 0), 0) || null,
+              openPorts,
+            });
+          }
+          pageToken = r.nextPageToken;
+        } while (pageToken);
       } catch {}
     }),
   );
