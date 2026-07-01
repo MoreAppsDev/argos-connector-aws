@@ -84,7 +84,7 @@ export async function runScan(defaultRegion) {
     regions_scanned: [],
   };
 
-  const [ec2m, s3m, iamm, ctm, kmsm, stsm, rdsm, lsm] = await Promise.all([
+  const [ec2m, s3m, iamm, ctm, kmsm, stsm, rdsm, lsm, cwm] = await Promise.all([
     import('@aws-sdk/client-ec2'),
     import('@aws-sdk/client-s3'),
     import('@aws-sdk/client-iam'),
@@ -93,6 +93,7 @@ export async function runScan(defaultRegion) {
     import('@aws-sdk/client-sts'),
     import('@aws-sdk/client-rds'),
     import('@aws-sdk/client-lightsail'),
+    import('@aws-sdk/client-cloudwatch'),
   ]);
 
   const base = defaultRegion ?? 'us-east-1';
@@ -303,6 +304,7 @@ export async function runScan(defaultRegion) {
           }
         } catch {}
 
+        const regionInstances = [];
         let token;
         do {
           const r = await ec2.send(
@@ -310,7 +312,7 @@ export async function runScan(defaultRegion) {
           );
           for (const res of r.Reservations ?? []) {
             for (const i of res.Instances ?? []) {
-              inv.instances.push({
+              regionInstances.push({
                 id: i.InstanceId,
                 name: tagName(i.Tags),
                 region,
@@ -321,6 +323,8 @@ export async function runScan(defaultRegion) {
                 az: i.Placement?.AvailabilityZone ?? null,
                 os: i.PlatformDetails ?? (i.Platform === 'windows' ? 'Windows' : 'Linux'),
                 diskGB: diskByInstance.get(i.InstanceId) ?? null,
+                cpuAvg: null,
+                netDailyMB: null,
                 vpcId: i.VpcId ?? null,
                 securityGroups: (i.SecurityGroups ?? []).map((g) => g.GroupId),
               });
@@ -328,6 +332,68 @@ export async function runScan(defaultRegion) {
           }
           token = r.NextToken;
         } while (token);
+
+        // CloudWatch: CPU + tráfego (14d) das máquinas RODANDO → detectar zumbi
+        try {
+          const running = regionInstances.filter((i) => i.state === 'running');
+          const cw = new cwm.CloudWatchClient({ region });
+          const endTime = new Date();
+          const startTime = new Date(Date.now() - 14 * 86_400_000);
+          for (let baseIdx = 0; baseIdx < running.length; baseIdx += 100) {
+            const batch = running.slice(baseIdx, baseIdx + 100);
+            const queries = [];
+            batch.forEach((inst, j) => {
+              const Dimensions = [{ Name: 'InstanceId', Value: inst.id }];
+              queries.push({
+                Id: `cpu${j}`,
+                MetricStat: {
+                  Metric: { Namespace: 'AWS/EC2', MetricName: 'CPUUtilization', Dimensions },
+                  Period: 86400,
+                  Stat: 'Average',
+                },
+              });
+              queries.push({
+                Id: `ni${j}`,
+                MetricStat: {
+                  Metric: { Namespace: 'AWS/EC2', MetricName: 'NetworkIn', Dimensions },
+                  Period: 86400,
+                  Stat: 'Sum',
+                },
+              });
+              queries.push({
+                Id: `no${j}`,
+                MetricStat: {
+                  Metric: { Namespace: 'AWS/EC2', MetricName: 'NetworkOut', Dimensions },
+                  Period: 86400,
+                  Stat: 'Sum',
+                },
+              });
+            });
+            const res = await cw.send(
+              new cwm.GetMetricDataCommand({
+                MetricDataQueries: queries,
+                StartTime: startTime,
+                EndTime: endTime,
+              }),
+            );
+            const byId = new Map();
+            for (const m of res.MetricDataResults ?? []) byId.set(m.Id, m.Values ?? []);
+            batch.forEach((inst, j) => {
+              const cpu = byId.get(`cpu${j}`) ?? [];
+              const ni = byId.get(`ni${j}`) ?? [];
+              const no = byId.get(`no${j}`) ?? [];
+              if (cpu.length) {
+                inst.cpuAvg = Math.round((cpu.reduce((a, b) => a + b, 0) / cpu.length) * 10) / 10;
+              }
+              if (ni.length || no.length) {
+                const bytes = ni.reduce((a, b) => a + b, 0) + no.reduce((a, b) => a + b, 0);
+                const days = Math.max(ni.length, no.length, 1);
+                inst.netDailyMB = Math.round((bytes / days / 1e6) * 10) / 10;
+              }
+            });
+          }
+        } catch {}
+        inv.instances.push(...regionInstances);
 
         let t2;
         do {

@@ -38,8 +38,15 @@ Resources:
       MemorySize: 256
       # SecurityAudit = política gerenciada READ-ONLY (describe/list/get). Sem
       # permissão de escrita — o connector nunca altera nada na conta do cliente.
+      # + CloudWatch (métricas) pra detectar máquina ociosa/zumbi (só leitura).
       Policies:
         - arn:aws:iam::aws:policy/SecurityAudit
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cloudwatch:GetMetricData
+                - cloudwatch:GetMetricStatistics
+              Resource: '*'
       Environment:
         Variables:
           ARGOS_INGEST_URL: !Ref IngestUrl
