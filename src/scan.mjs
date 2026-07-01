@@ -74,6 +74,9 @@ export async function runScan(defaultRegion) {
     buckets: [],
     databases: [],
     lightsail: [],
+    snapshots: [],
+    unattached_volumes: [],
+    unused_eips: [],
     iam_users: [],
     root: null,
     kms_keys: [],
@@ -200,7 +203,7 @@ export async function runScan(defaultRegion) {
       try {
         const ec2 = new ec2m.EC2Client({ region });
 
-        // discos (EBS) → soma por instância (uma chamada por região)
+        // discos (EBS) → soma por instância + coleta os SOLTOS (desperdício)
         const diskByInstance = new Map();
         try {
           let vt;
@@ -209,7 +212,17 @@ export async function runScan(defaultRegion) {
               new ec2m.DescribeVolumesCommand({ NextToken: vt, MaxResults: 500 }),
             );
             for (const v of vr.Volumes ?? []) {
-              for (const a of v.Attachments ?? []) {
+              const atts = v.Attachments ?? [];
+              if (atts.length === 0) {
+                inv.unattached_volumes.push({
+                  id: v.VolumeId,
+                  sizeGB: v.Size ?? null,
+                  ageDays: ageDays(v.CreateTime),
+                  region,
+                });
+                continue;
+              }
+              for (const a of atts) {
                 if (!a.InstanceId) continue;
                 diskByInstance.set(
                   a.InstanceId,
@@ -219,6 +232,75 @@ export async function runScan(defaultRegion) {
             }
             vt = vr.NextToken;
           } while (vt);
+        } catch {}
+
+        // Elastic IPs não associados (cobram parados)
+        try {
+          const ad = await ec2.send(new ec2m.DescribeAddressesCommand({}));
+          for (const a of ad.Addresses ?? []) {
+            if (!a.AssociationId && !a.InstanceId) {
+              inv.unused_eips.push({ ip: a.PublicIp, region });
+            }
+          }
+        } catch {}
+
+        // Snapshots EBS próprios (backup/custo) + quais são PÚBLICOS (vazamento)
+        try {
+          const publicIds = new Set();
+          try {
+            const pub = await ec2.send(
+              new ec2m.DescribeSnapshotsCommand({
+                OwnerIds: ['self'],
+                RestorableByUserIds: ['all'],
+                MaxResults: 1000,
+              }),
+            );
+            for (const s of pub.Snapshots ?? []) publicIds.add(s.SnapshotId);
+          } catch {}
+          let st;
+          let n = 0;
+          do {
+            const sr = await ec2.send(
+              new ec2m.DescribeSnapshotsCommand({
+                OwnerIds: ['self'],
+                NextToken: st,
+                MaxResults: 1000,
+              }),
+            );
+            for (const s of sr.Snapshots ?? []) {
+              if (n++ >= 1000) break;
+              inv.snapshots.push({
+                id: s.SnapshotId,
+                kind: 'ebs',
+                name: s.Description ?? null,
+                sizeGB: s.VolumeSize ?? null,
+                ageDays: ageDays(s.StartTime),
+                public: publicIds.has(s.SnapshotId),
+                region,
+              });
+            }
+            st = sr.NextToken;
+          } while (st && n < 1000);
+        } catch {}
+
+        // AMIs próprias (imagens) — Public é flag direta
+        try {
+          const im = await ec2.send(new ec2m.DescribeImagesCommand({ Owners: ['self'] }));
+          for (const img of im.Images ?? []) {
+            const sizeGB = (img.BlockDeviceMappings ?? []).reduce(
+              (s, b) => s + (b.Ebs?.VolumeSize ?? 0),
+              0,
+            );
+            inv.snapshots.push({
+              id: img.ImageId,
+              kind: 'ami',
+              name: img.Name ?? null,
+              sizeGB: sizeGB || null,
+              ageDays: ageDays(img.CreationDate),
+              public: Boolean(img.Public),
+              region,
+            });
+          }
         } catch {}
 
         let token;
@@ -338,6 +420,28 @@ export async function runScan(defaultRegion) {
           }
           marker = r.Marker;
         } while (marker);
+
+        // snapshots de RDS (backup/custo)
+        let sm;
+        let sn = 0;
+        do {
+          const sr = await rds.send(
+            new rdsm.DescribeDBSnapshotsCommand({ Marker: sm, MaxRecords: 100 }),
+          );
+          for (const s of sr.DBSnapshots ?? []) {
+            if (sn++ >= 500) break;
+            inv.snapshots.push({
+              id: s.DBSnapshotIdentifier,
+              kind: 'rds',
+              name: s.Engine ?? null,
+              sizeGB: s.AllocatedStorage ?? null,
+              ageDays: ageDays(s.SnapshotCreateTime),
+              public: false, // público de snapshot RDS via attributes = fase posterior
+              region,
+            });
+          }
+          sm = sr.Marker;
+        } while (sm && sn < 500);
       } catch {}
 
       // Lightsail: instâncias (VPS) por região — portas abertas ao mundo
