@@ -195,6 +195,28 @@ export async function runScan(defaultRegion) {
       // EC2: instâncias, security groups, VPCs
       try {
         const ec2 = new ec2m.EC2Client({ region });
+
+        // discos (EBS) → soma por instância (uma chamada por região)
+        const diskByInstance = new Map();
+        try {
+          let vt;
+          do {
+            const vr = await ec2.send(
+              new ec2m.DescribeVolumesCommand({ NextToken: vt, MaxResults: 500 }),
+            );
+            for (const v of vr.Volumes ?? []) {
+              for (const a of v.Attachments ?? []) {
+                if (!a.InstanceId) continue;
+                diskByInstance.set(
+                  a.InstanceId,
+                  (diskByInstance.get(a.InstanceId) ?? 0) + (v.Size ?? 0),
+                );
+              }
+            }
+            vt = vr.NextToken;
+          } while (vt);
+        } catch {}
+
         let token;
         do {
           const r = await ec2.send(
@@ -211,6 +233,8 @@ export async function runScan(defaultRegion) {
                 privateIp: i.PrivateIpAddress ?? null,
                 type: i.InstanceType ?? null,
                 az: i.Placement?.AvailabilityZone ?? null,
+                os: i.PlatformDetails ?? (i.Platform === 'windows' ? 'Windows' : 'Linux'),
+                diskGB: diskByInstance.get(i.InstanceId) ?? null,
                 vpcId: i.VpcId ?? null,
                 securityGroups: (i.SecurityGroups ?? []).map((g) => g.GroupId),
               });
