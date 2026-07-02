@@ -37,8 +37,9 @@ Resources:
       Timeout: 120
       MemorySize: 256
       # SecurityAudit = política gerenciada READ-ONLY (describe/list/get). Sem
-      # permissão de escrita — o connector nunca altera nada na conta do cliente.
+      # permissão de escrita, o connector nunca altera nada na conta do cliente.
       # + CloudWatch (métricas) pra detectar máquina ociosa/zumbi (só leitura).
+      # + Cost Explorer (ce:GetCostAndUsage) pra ler o custo REAL da conta.
       Policies:
         - arn:aws:iam::aws:policy/SecurityAudit
         - Statement:
@@ -46,6 +47,7 @@ Resources:
               Action:
                 - cloudwatch:GetMetricData
                 - cloudwatch:GetMetricStatistics
+                - ce:GetCostAndUsage
               Resource: '*'
       Environment:
         Variables:

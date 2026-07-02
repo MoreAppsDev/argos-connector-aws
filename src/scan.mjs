@@ -573,5 +573,58 @@ export async function runScan(defaultRegion) {
     }),
   );
 
+  // ── custo REAL (Cost Explorer, endpoint global us-east-1) ────────────────────
+  // Gasto mensal dos últimos 12 meses + top serviços do mês corrente. Payload
+  // minúsculo (só agregados). Best-effort: conta sem Cost Explorer habilitado lança.
+  try {
+    const cem = await import('@aws-sdk/client-cost-explorer');
+    const ce = new cem.CostExplorerClient({ region: 'us-east-1' });
+    const now = new Date();
+    const fmt = (d) => d.toISOString().slice(0, 10);
+    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1));
+
+    // NetUnblendedCost = já com créditos/descontos aplicados (mais perto do que
+    // efetivamente sai da conta na fatura).
+    const r = await ce.send(
+      new cem.GetCostAndUsageCommand({
+        TimePeriod: { Start: fmt(start), End: fmt(end) },
+        Granularity: 'MONTHLY',
+        Metrics: ['NetUnblendedCost'],
+      }),
+    );
+    const months = (r.ResultsByTime ?? []).map((t) => ({
+      month: t.TimePeriod?.Start?.slice(0, 7) ?? null,
+      amount: Number(t.Total?.NetUnblendedCost?.Amount ?? 0),
+    }));
+    const currency = r.ResultsByTime?.[0]?.Total?.NetUnblendedCost?.Unit ?? 'USD';
+
+    // top serviços do mês corrente (pra "onde o dinheiro vai")
+    let byService = [];
+    try {
+      const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const sr = await ce.send(
+        new cem.GetCostAndUsageCommand({
+          TimePeriod: { Start: fmt(monthStart), End: fmt(end) },
+          Granularity: 'MONTHLY',
+          Metrics: ['NetUnblendedCost'],
+          GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }],
+        }),
+      );
+      byService = (sr.ResultsByTime?.[0]?.Groups ?? [])
+        .map((g) => ({
+          service: g.Keys?.[0] ?? '?',
+          amount: Number(g.Metrics?.NetUnblendedCost?.Amount ?? 0),
+        }))
+        .filter((s) => s.amount > 0)
+        .sort((a, b) => b.amount - a.amount)
+        .slice(0, 8);
+    } catch {}
+
+    inv.cost = { currency, months, byService, fetchedAt: new Date().toISOString() };
+  } catch (e) {
+    console.error('[argos] scan cost explorer:', e?.name);
+  }
+
   return inv;
 }
