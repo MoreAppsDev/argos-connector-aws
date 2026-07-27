@@ -227,3 +227,135 @@ test('payload de ingestão mapeia eventID e raw', () => {
   assert.equal(p.raw.source_ip, '203.0.113.10');
   assert.equal(p.raw.cloudtrail.eventName, 'ConsoleLogin');
 });
+
+// ── Lote 3 (2026-07): evasão de defesa, exfil de snapshot, federação, destruição ──
+
+test('DeleteDetector (GuardDuty) → aws_security_tool_disabled sev 9', () => {
+  const d = detect({
+    eventID: 'gd1',
+    eventName: 'DeleteDetector',
+    eventSource: 'guardduty.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'intruso' },
+    requestParameters: { detectorId: 'det-123' },
+  });
+  assert.equal(d?.key, 'aws_security_tool_disabled');
+  assert.equal(d.severity, 9);
+});
+
+test('UpdateDetector enable=false → aws_security_tool_disabled', () => {
+  const d = detect({
+    eventID: 'gd2',
+    eventName: 'UpdateDetector',
+    eventSource: 'guardduty.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'intruso' },
+    requestParameters: { detectorId: 'det-123', enable: false },
+  });
+  assert.equal(d?.key, 'aws_security_tool_disabled');
+});
+
+test('UpdateDetector enable=true → ignorado (religar não é ameaça)', () => {
+  assert.equal(
+    detect({
+      eventID: 'gd3',
+      eventName: 'UpdateDetector',
+      eventSource: 'guardduty.amazonaws.com',
+      userIdentity: { type: 'IAMUser', userName: 'admin' },
+      requestParameters: { detectorId: 'det-123', enable: true },
+    }),
+    null,
+  );
+});
+
+test('ModifySnapshotAttribute pra conta externa → aws_snapshot_shared_external sev 8', () => {
+  const d = detect({
+    eventID: 'sn1',
+    eventName: 'ModifySnapshotAttribute',
+    eventSource: 'ec2.amazonaws.com',
+    recipientAccountId: '123456789012',
+    userIdentity: { type: 'IAMUser', userName: 'intruso', accountId: '123456789012' },
+    requestParameters: {
+      snapshotId: 'snap-abc',
+      createVolumePermission: { add: { items: [{ userId: '999888777666' }] } },
+    },
+  });
+  assert.equal(d?.key, 'aws_snapshot_shared_external');
+  assert.equal(d.severity, 8);
+  assert.equal(d.target, 'snap-abc');
+});
+
+test('ModifyImageAttribute tornando AMI pública → sev 9', () => {
+  const d = detect({
+    eventID: 'sn2',
+    eventName: 'ModifyImageAttribute',
+    eventSource: 'ec2.amazonaws.com',
+    recipientAccountId: '123456789012',
+    userIdentity: { type: 'IAMUser', accountId: '123456789012' },
+    requestParameters: { imageId: 'ami-xyz', launchPermission: { add: { items: [{ group: 'all' }] } } },
+  });
+  assert.equal(d?.key, 'aws_snapshot_shared_external');
+  assert.equal(d.severity, 9);
+});
+
+test('ModifySnapshotAttribute pra própria conta → ignorado', () => {
+  assert.equal(
+    detect({
+      eventID: 'sn3',
+      eventName: 'ModifySnapshotAttribute',
+      eventSource: 'ec2.amazonaws.com',
+      recipientAccountId: '123456789012',
+      userIdentity: { type: 'IAMUser', accountId: '123456789012' },
+      requestParameters: {
+        snapshotId: 'snap-self',
+        createVolumePermission: { add: { items: [{ userId: '123456789012' }] } },
+      },
+    }),
+    null,
+  );
+});
+
+test('CreateSAMLProvider → aws_saml_provider_change sev 9', () => {
+  const d = detect({
+    eventID: 'saml1',
+    eventName: 'CreateSAMLProvider',
+    eventSource: 'iam.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'intruso' },
+    requestParameters: { name: 'evil-idp' },
+  });
+  assert.equal(d?.key, 'aws_saml_provider_change');
+  assert.equal(d.severity, 9);
+  assert.equal(d.target, 'evil-idp');
+});
+
+test('DeleteDBInstance sem snapshot final → aws_data_destruction sev 9', () => {
+  const d = detect({
+    eventID: 'dd1',
+    eventName: 'DeleteDBInstance',
+    eventSource: 'rds.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'intruso' },
+    requestParameters: { dBInstanceIdentifier: 'prod-db', skipFinalSnapshot: true },
+  });
+  assert.equal(d?.key, 'aws_data_destruction');
+  assert.equal(d.severity, 9);
+  assert.equal(d.target, 'prod-db');
+});
+
+test('TerminateInstances de 6 instâncias → aws_data_destruction; 1 só → ignorado', () => {
+  const many = detect({
+    eventID: 'dd2',
+    eventName: 'TerminateInstances',
+    eventSource: 'ec2.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'intruso' },
+    requestParameters: {
+      instancesSet: { items: Array.from({ length: 6 }, (_, i) => ({ instanceId: `i-${i}` })) },
+    },
+  });
+  assert.equal(many?.key, 'aws_data_destruction');
+  const one = detect({
+    eventID: 'dd3',
+    eventName: 'TerminateInstances',
+    eventSource: 'ec2.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'devops' },
+    requestParameters: { instancesSet: { items: [{ instanceId: 'i-solo' }] } },
+  });
+  assert.equal(one, null);
+});

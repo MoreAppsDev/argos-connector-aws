@@ -92,6 +92,27 @@ function openToWorldIngress(r) {
 }
 
 /**
+ * Grantees ADICIONADOS num compartilhamento de snapshot/AMI/DB-snapshot.
+ * Cobre ModifySnapshotAttribute (createVolumePermission.add), ModifyImageAttribute
+ * (launchPermission.add) e Modify(DB|DBCluster)SnapshotAttribute (restore/valuesToAdd).
+ * Retorna lista de strings ('all' = público, ou um account id de 12 dígitos).
+ */
+function sharedGrantees(r) {
+  const rp = r.requestParameters ?? {};
+  const out = [];
+  for (const list of [rp.createVolumePermission?.add, rp.launchPermission?.add]) {
+    for (const g of toArray(list)) {
+      if (g?.group) out.push(String(g.group).toLowerCase());
+      if (g?.userId) out.push(String(g.userId));
+    }
+  }
+  if (rp.attributeName === 'restore') {
+    for (const v of toArray(rp.valuesToAdd)) out.push(String(v).toLowerCase());
+  }
+  return out;
+}
+
+/**
  * Catálogo de regras de detecção. Cada uma recebe o registro CloudTrail e
  * devolve uma Detection (match) ou null. `detect()` escolhe a de maior severidade.
  */
@@ -244,6 +265,133 @@ const RULES = [
       target: forUser ?? actor,
       action: r.eventName,
     };
+  },
+
+  // aws_security_tool_disabled — desligar GuardDuty/Config/Security Hub = evasão de
+  // defesa (o atacante apaga os olhos da conta antes de agir).
+  function securityToolDisabled(r) {
+    const map = {
+      DeleteDetector: 9, // GuardDuty
+      StopMonitoringMembers: 8, // GuardDuty (para de monitorar contas membro)
+      DisableSecurityHub: 9, // Security Hub
+      StopConfigurationRecorder: 9, // AWS Config
+      DeleteConfigurationRecorder: 9, // AWS Config
+    };
+    let sev = map[r.eventName];
+    // UpdateDetector com enable=false = desligar o GuardDuty sem deletar.
+    if (r.eventName === 'UpdateDetector' && r.requestParameters?.enable === false) sev = 9;
+    if (!sev) return null;
+    return {
+      key: 'aws_security_tool_disabled',
+      title: 'Ferramenta de segurança AWS desligada',
+      severity: sev,
+      actor: actorOf(r),
+      target: r.eventSource ?? r.requestParameters?.detectorId ?? null,
+      action: r.eventName,
+    };
+  },
+
+  // aws_snapshot_shared_external — snapshot/AMI compartilhado com conta EXTERNA ou
+  // tornado público = exfiltração furtiva (copia os dados sem baixar nada).
+  function snapshotSharedExternal(r) {
+    const names = [
+      'ModifySnapshotAttribute',
+      'ModifyImageAttribute',
+      'ModifyDBSnapshotAttribute',
+      'ModifyDBClusterSnapshotAttribute',
+    ];
+    if (!names.includes(r.eventName)) return null;
+    const own = r.recipientAccountId ?? r.userIdentity?.accountId ?? null;
+    const grantees = sharedGrantees(r);
+    const madePublic = grantees.includes('all');
+    const toExternal = grantees.some((g) => /^\d{12}$/.test(g) && g !== own);
+    if (!madePublic && !toExternal) return null;
+    return {
+      key: 'aws_snapshot_shared_external',
+      title: 'Snapshot/AMI compartilhado com conta externa',
+      severity: madePublic ? 9 : 8,
+      actor: actorOf(r),
+      target:
+        r.requestParameters?.snapshotId ??
+        r.requestParameters?.imageId ??
+        r.requestParameters?.dBSnapshotIdentifier ??
+        r.requestParameters?.dBClusterSnapshotIdentifier ??
+        null,
+      action: r.eventName,
+    };
+  },
+
+  // aws_saml_provider_change — criar/alterar provedor de federação SAML/OIDC =
+  // persistência de identidade (quem controla a federação forja acessos).
+  function samlProviderChange(r) {
+    const names = ['CreateSAMLProvider', 'UpdateSAMLProvider', 'CreateOpenIDConnectProvider'];
+    if (!names.includes(r.eventName)) return null;
+    return {
+      key: 'aws_saml_provider_change',
+      title: 'Provedor de federação (SAML/OIDC) criado ou alterado',
+      severity: 9,
+      actor: actorOf(r),
+      target:
+        r.requestParameters?.name ??
+        r.requestParameters?.sAMLProviderArn ??
+        r.requestParameters?.url ??
+        null,
+      action: r.eventName,
+    };
+  },
+
+  // aws_data_destruction — destruir dados sem salvaguarda (banco sem snapshot final,
+  // bucket, ou muitas instâncias de uma vez) = impacto/ransomware.
+  function dataDestruction(r) {
+    const rp = r.requestParameters ?? {};
+    const skip = rp.skipFinalSnapshot === true || rp.skipFinalSnapshot === 'true';
+    if (r.eventName === 'DeleteDBInstance') {
+      return {
+        key: 'aws_data_destruction',
+        title: 'Destruição de dados na AWS',
+        severity: skip ? 9 : 7,
+        actor: actorOf(r),
+        target: rp.dBInstanceIdentifier ?? null,
+        action: r.eventName,
+      };
+    }
+    if (r.eventName === 'DeleteDBCluster') {
+      return {
+        key: 'aws_data_destruction',
+        title: 'Destruição de dados na AWS',
+        severity: skip ? 9 : 7,
+        actor: actorOf(r),
+        target: rp.dBClusterIdentifier ?? null,
+        action: r.eventName,
+      };
+    }
+    if (r.eventName === 'DeleteBucket') {
+      return {
+        key: 'aws_data_destruction',
+        title: 'Destruição de dados na AWS',
+        severity: 8,
+        actor: actorOf(r),
+        target: rp.bucketName ?? null,
+        action: r.eventName,
+      };
+    }
+    // TerminateInstances é rotineiro (autoscaling/dev) — só vira evento em VOLUME
+    // (5+ numa chamada = destruição em massa), pra não gerar ruído no dia a dia.
+    if (r.eventName === 'TerminateInstances') {
+      const ids = toArray(rp.instancesSet?.items)
+        .map((x) => x?.instanceId)
+        .filter(Boolean);
+      if (ids.length < 5) return null;
+      return {
+        key: 'aws_data_destruction',
+        title: 'Destruição de dados na AWS',
+        severity: 8,
+        actor: actorOf(r),
+        target: `${ids.length} instâncias EC2`,
+        action: r.eventName,
+      };
+    }
+    return null;
   },
 ];
 

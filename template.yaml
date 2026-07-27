@@ -77,6 +77,10 @@ Resources:
                 - aws.ec2
                 - aws.kms
                 - aws.cloudtrail
+                - aws.guardduty
+                - aws.config
+                - aws.securityhub
+                - aws.rds
               detail-type:
                 - AWS API Call via CloudTrail
               detail:
@@ -88,12 +92,20 @@ Resources:
                   - CreateLoginProfile
                   - CreateUser
                   - CreateAccessKey
-                  # S3 — exposição pública
+                  # IAM — federação (golden SAML / persistência)
+                  - CreateSAMLProvider
+                  - UpdateSAMLProvider
+                  - CreateOpenIDConnectProvider
+                  # S3 — exposição pública / destruição
                   - PutBucketAcl
                   - PutObjectAcl
                   - PutBucketPolicy
-                  # EC2 — porta aberta ao mundo
+                  - DeleteBucket
+                  # EC2 — porta aberta ao mundo / compartilhamento / destruição em massa
                   - AuthorizeSecurityGroupIngress
+                  - ModifySnapshotAttribute
+                  - ModifyImageAttribute
+                  - TerminateInstances
                   # KMS — destruição de chave
                   - DisableKey
                   - ScheduleKeyDeletion
@@ -101,6 +113,18 @@ Resources:
                   - StopLogging
                   - DeleteTrail
                   - UpdateTrail
+                  # GuardDuty / Config / Security Hub — evasão de defesa (desligar sensores)
+                  - DeleteDetector
+                  - StopMonitoringMembers
+                  - UpdateDetector
+                  - StopConfigurationRecorder
+                  - DeleteConfigurationRecorder
+                  - DisableSecurityHub
+                  # RDS — compartilhar snapshot externo / destruir banco
+                  - ModifyDBSnapshotAttribute
+                  - ModifyDBClusterSnapshotAttribute
+                  - DeleteDBInstance
+                  - DeleteDBCluster
         # Heartbeat (liveness): pinga o Argos a cada 15 min mesmo sem evento, pra
         # o painel distinguir "vivo e quieto" de "offline".
         Heartbeat:

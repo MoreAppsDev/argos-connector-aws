@@ -21,6 +21,10 @@ CloudTrail → EventBridge → Lambda (este connector) → POST /api/ingest/secu
 | `kms_key_destruction` | `DisableKey`/`ScheduleKeyDeletion` | 9/8 |
 | `security_group_open_world` | `AuthorizeSecurityGroupIngress` porta sensível → `0.0.0.0/0` | 8 |
 | `iam_access_key_created` | `CreateAccessKey` (persistência) | 6/7 |
+| `aws_security_tool_disabled` | GuardDuty/Config/Security Hub off (`DeleteDetector`, `UpdateDetector` enable=false, `Stop/DeleteConfigurationRecorder`, `DisableSecurityHub`) | 8/9 |
+| `aws_snapshot_shared_external` | `Modify(Snapshot\|Image\|DBSnapshot\|DBClusterSnapshot)Attribute` compartilhando com conta externa/`all` | 8/9 |
+| `aws_saml_provider_change` | `CreateSAMLProvider`/`UpdateSAMLProvider`/`CreateOpenIDConnectProvider` (golden SAML / persistência) | 9 |
+| `aws_data_destruction` | `DeleteDBInstance`/`DeleteDBCluster` sem snapshot final, `DeleteBucket`, `TerminateInstances` em massa (5+) | 8/9 |
 
 A lógica vive em [`src/detection.mjs`](src/detection.mjs) e é coberta por testes
 (`node --test`). Eventos que não casam nenhuma regra são **descartados no edge**.
