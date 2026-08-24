@@ -393,6 +393,49 @@ const RULES = [
     }
     return null;
   },
+
+  // ── Trilha de MUDANÇA (world='change' no Argos: avisa por e-mail/Telegram, NUNCA liga) ──
+  // O Argos não é só cibersegurança: mudança de recurso (subiu/derrubou máquina) o dono
+  // precisa saber, mesmo sem ser ataque nem queda. Ver docs/ROADMAP-NOTIFICACAO.md.
+
+  // aws_ec2_run — instância(s) EC2 criada(s) (RunInstances). Mudança informativa.
+  function ec2Run(r) {
+    if (r.eventName !== 'RunInstances') return null;
+    const items = toArray(r.responseElements?.instancesSet?.items);
+    const ids = items.map((x) => x?.instanceId).filter(Boolean);
+    const type = items[0]?.instanceType ?? null;
+    const target = ids.length
+      ? ids.length === 1
+        ? ids[0]
+        : `${ids.length} instâncias EC2`
+      : (type ?? 'EC2');
+    return {
+      key: 'aws_ec2_run',
+      title: 'Instância EC2 criada',
+      severity: 4,
+      actor: actorOf(r),
+      target,
+      action: r.eventName,
+    };
+  },
+
+  // aws_ec2_terminate — instância(s) EC2 terminada(s) em pequena quantidade (1-4).
+  // Mudança informativa. 5+ numa chamada é destruição em massa e vira aws_data_destruction.
+  function ec2Terminate(r) {
+    if (r.eventName !== 'TerminateInstances') return null;
+    const ids = toArray(r.requestParameters?.instancesSet?.items)
+      .map((x) => x?.instanceId)
+      .filter(Boolean);
+    if (ids.length >= 5) return null; // massa = ameaça (dataDestruction cuida)
+    return {
+      key: 'aws_ec2_terminate',
+      title: 'Instância EC2 terminada',
+      severity: 5,
+      actor: actorOf(r),
+      target: ids.length ? (ids.length === 1 ? ids[0] : `${ids.length} instâncias EC2`) : 'EC2',
+      action: r.eventName,
+    };
+  },
 ];
 
 /**

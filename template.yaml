@@ -106,6 +106,8 @@ Resources:
                   - ModifySnapshotAttribute
                   - ModifyImageAttribute
                   - TerminateInstances
+                  # EC2 — trilha de MUDANÇA (subiu máquina): informativo, não é ameaça
+                  - RunInstances
                   # KMS — destruição de chave
                   - DisableKey
                   - ScheduleKeyDeletion

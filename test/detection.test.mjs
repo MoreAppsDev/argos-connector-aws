@@ -339,7 +339,7 @@ test('DeleteDBInstance sem snapshot final → aws_data_destruction sev 9', () =>
   assert.equal(d.target, 'prod-db');
 });
 
-test('TerminateInstances de 6 instâncias → aws_data_destruction; 1 só → ignorado', () => {
+test('TerminateInstances de 6 instâncias → aws_data_destruction (ameaça); 1 só → aws_ec2_terminate (mudança)', () => {
   const many = detect({
     eventID: 'dd2',
     eventName: 'TerminateInstances',
@@ -350,6 +350,7 @@ test('TerminateInstances de 6 instâncias → aws_data_destruction; 1 só → ig
     },
   });
   assert.equal(many?.key, 'aws_data_destruction');
+  // 1-4 instâncias: não é destruição em massa, mas o dono precisa saber (trilha de mudança).
   const one = detect({
     eventID: 'dd3',
     eventName: 'TerminateInstances',
@@ -357,5 +358,37 @@ test('TerminateInstances de 6 instâncias → aws_data_destruction; 1 só → ig
     userIdentity: { type: 'IAMUser', userName: 'devops' },
     requestParameters: { instancesSet: { items: [{ instanceId: 'i-solo' }] } },
   });
-  assert.equal(one, null);
+  assert.equal(one?.key, 'aws_ec2_terminate');
+  assert.equal(one.severity, 5);
+  assert.equal(one.target, 'i-solo');
+});
+
+test('RunInstances → aws_ec2_run (mudança) sev 4', () => {
+  const d = detect({
+    eventID: 'ec2run1',
+    eventName: 'RunInstances',
+    eventSource: 'ec2.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'devops' },
+    responseElements: {
+      instancesSet: { items: [{ instanceId: 'i-new123', instanceType: 't3.micro' }] },
+    },
+  });
+  assert.equal(d?.key, 'aws_ec2_run');
+  assert.equal(d.severity, 4);
+  assert.equal(d.actor, 'devops');
+  assert.equal(d.target, 'i-new123');
+});
+
+test('RunInstances de 3 máquinas → aws_ec2_run com contagem no alvo', () => {
+  const d = detect({
+    eventID: 'ec2run2',
+    eventName: 'RunInstances',
+    eventSource: 'ec2.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'devops' },
+    responseElements: {
+      instancesSet: { items: Array.from({ length: 3 }, (_, i) => ({ instanceId: `i-${i}` })) },
+    },
+  });
+  assert.equal(d?.key, 'aws_ec2_run');
+  assert.equal(d.target, '3 instâncias EC2');
 });
