@@ -112,6 +112,13 @@ Resources:
                   - TerminateInstances
                   # EC2 — trilha de MUDANÇA (subiu máquina): informativo, não é ameaça
                   - RunInstances
+                  # Trilha de MUDANÇA (world='change'): recurso deletado + IAM criado/deletado.
+                  # Avisa e-mail/Telegram, nunca liga. Bucket/RDS já caem em data_destruction.
+                  - DeleteVolume
+                  - DeleteSnapshot
+                  - DeleteUser
+                  - CreateRole
+                  - DeleteRole
                   # KMS — destruição de chave
                   - DisableKey
                   - ScheduleKeyDeletion

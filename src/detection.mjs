@@ -474,6 +474,50 @@ const RULES = [
       action: r.eventName,
     };
   },
+
+  // aws_resource_deleted — recurso deletado que NÃO é destruição de dados de alto sinal
+  // (bucket S3 / banco RDS caem em aws_data_destruction). Volume/snapshot EBS = mudança.
+  function resourceDeleted(r) {
+    const sev = { DeleteVolume: 5, DeleteSnapshot: 5 }[r.eventName];
+    if (!sev) return null;
+    const rp = r.requestParameters ?? {};
+    return {
+      key: 'aws_resource_deleted',
+      title: 'Recurso AWS deletado',
+      severity: sev,
+      actor: actorOf(r),
+      target: rp.volumeId ?? rp.snapshotId ?? null,
+      action: r.eventName,
+    };
+  },
+
+  // aws_iam_user_change — usuário IAM DELETADO (mudança sensível de acesso). A CRIAÇÃO de
+  // usuário cai em iam_no_mfa (tier de segurança, verifica MFA), então aqui só a deleção.
+  function iamUserChange(r) {
+    if (r.eventName !== 'DeleteUser') return null;
+    return {
+      key: 'aws_iam_user_change',
+      title: 'Usuário IAM deletado',
+      severity: 4,
+      actor: actorOf(r),
+      target: r.requestParameters?.userName ?? null,
+      action: r.eventName,
+    };
+  },
+
+  // aws_iam_role_change — role IAM criada ou deletada (mudança sensível de acesso).
+  function iamRoleChange(r) {
+    const sev = { CreateRole: 4, DeleteRole: 4 }[r.eventName];
+    if (!sev) return null;
+    return {
+      key: 'aws_iam_role_change',
+      title: r.eventName === 'CreateRole' ? 'Role IAM criada' : 'Role IAM deletada',
+      severity: sev,
+      actor: actorOf(r),
+      target: r.requestParameters?.roleName ?? null,
+      action: r.eventName,
+    };
+  },
 ];
 
 /**

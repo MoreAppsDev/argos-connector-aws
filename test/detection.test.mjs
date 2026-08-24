@@ -452,3 +452,52 @@ test('StopBackupJob → aws_backup_tamper sev 8', () => {
   assert.equal(d?.key, 'aws_backup_tamper');
   assert.equal(d.severity, 8);
 });
+
+test('DeleteVolume → aws_resource_deleted (mudança) sev 5', () => {
+  const d = detect({
+    eventID: 'del1',
+    eventName: 'DeleteVolume',
+    eventSource: 'ec2.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'devops' },
+    requestParameters: { volumeId: 'vol-abc' },
+  });
+  assert.equal(d?.key, 'aws_resource_deleted');
+  assert.equal(d.severity, 5);
+  assert.equal(d.target, 'vol-abc');
+});
+
+test('DeleteUser → aws_iam_user_change (mudança)', () => {
+  const d = detect({
+    eventID: 'del2',
+    eventName: 'DeleteUser',
+    eventSource: 'iam.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'admin' },
+    requestParameters: { userName: 'ex-func' },
+  });
+  assert.equal(d?.key, 'aws_iam_user_change');
+  assert.equal(d.target, 'ex-func');
+});
+
+test('CreateRole → aws_iam_role_change (mudança)', () => {
+  const d = detect({
+    eventID: 'del3',
+    eventName: 'CreateRole',
+    eventSource: 'iam.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'devops' },
+    requestParameters: { roleName: 'nova-role' },
+  });
+  assert.equal(d?.key, 'aws_iam_role_change');
+  assert.equal(d.title, 'Role IAM criada');
+  assert.equal(d.target, 'nova-role');
+});
+
+test('CreateUser continua iam_no_mfa (segurança), não vira mudança', () => {
+  const d = detect({
+    eventID: 'del4',
+    eventName: 'CreateUser',
+    eventSource: 'iam.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'admin' },
+    requestParameters: { userName: 'novo' },
+  });
+  assert.equal(d?.key, 'iam_no_mfa');
+});
