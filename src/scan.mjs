@@ -81,10 +81,12 @@ export async function runScan(defaultRegion) {
     root: null,
     kms_keys: [],
     trails: [],
+    // Saúde do backup de nuvem (AWS Backup): nº de cofres + jobs FALHOS/EXPIRADOS (7d).
+    backup: { vaults: 0, failedJobs: [] },
     regions_scanned: [],
   };
 
-  const [ec2m, s3m, iamm, ctm, kmsm, stsm, rdsm, lsm, cwm] = await Promise.all([
+  const [ec2m, s3m, iamm, ctm, kmsm, stsm, rdsm, lsm, cwm, bkpm] = await Promise.all([
     import('@aws-sdk/client-ec2'),
     import('@aws-sdk/client-s3'),
     import('@aws-sdk/client-iam'),
@@ -94,6 +96,7 @@ export async function runScan(defaultRegion) {
     import('@aws-sdk/client-rds'),
     import('@aws-sdk/client-lightsail'),
     import('@aws-sdk/client-cloudwatch'),
+    import('@aws-sdk/client-backup'),
   ]);
 
   const base = defaultRegion ?? 'us-east-1';
@@ -540,6 +543,40 @@ export async function runScan(defaultRegion) {
           }
           sm = sr.Marker;
         } while (sm && sn < 500);
+      } catch {}
+
+      // AWS Backup: saúde dos backups de nuvem — nº de cofres + jobs FALHOS/EXPIRADOS (7d).
+      // Só leitura. "Teve falha / não rodou" é o que o app depois vira postura/recomendação.
+      try {
+        const bkp = new bkpm.BackupClient({ region });
+        try {
+          const vres = await bkp.send(new bkpm.ListBackupVaultsCommand({ MaxResults: 100 }));
+          inv.backup.vaults += (vres.BackupVaultList ?? []).length;
+        } catch {}
+        const since = new Date(Date.now() - 7 * 86_400_000);
+        for (const state of ['FAILED', 'EXPIRED']) {
+          try {
+            const jr = await bkp.send(
+              new bkpm.ListBackupJobsCommand({
+                ByState: state,
+                ByCreatedAfter: since,
+                MaxResults: 50,
+              }),
+            );
+            for (const j of jr.BackupJobs ?? []) {
+              if (inv.backup.failedJobs.length >= 50) break;
+              const when = j.CompletionDate ?? j.CreationDate ?? null;
+              inv.backup.failedJobs.push({
+                region,
+                state: j.State ?? state,
+                resourceType: j.ResourceType ?? null,
+                resource: j.ResourceArn ? j.ResourceArn.split(':').pop() : (j.BackupVaultName ?? null),
+                at: when ? new Date(when).toISOString() : null,
+                message: j.StatusMessage ?? null,
+              });
+            }
+          } catch {}
+        }
       } catch {}
 
       // Lightsail: instâncias (VPS) por região — portas abertas ao mundo

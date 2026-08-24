@@ -48,6 +48,10 @@ Resources:
                 - cloudwatch:GetMetricData
                 - cloudwatch:GetMetricStatistics
                 - ce:GetCostAndUsage
+                # AWS Backup (saúde do backup de nuvem): só leitura. SecurityAudit pode não
+                # cobrir, então garantimos aqui. Nenhuma escrita.
+                - backup:ListBackupJobs
+                - backup:ListBackupVaults
               Resource: '*'
       Environment:
         Variables:
