@@ -394,6 +394,44 @@ const RULES = [
     return null;
   },
 
+  // aws_backup_disabled — desligar backups automáticos do RDS (retention=0) = inibir
+  // recuperação (T1490), jogada de pré-ransomware. Só dispara ao ZERAR a retenção.
+  function backupDisabled(r) {
+    if (r.eventName !== 'ModifyDBInstance') return null;
+    const rp = r.requestParameters ?? {};
+    if (rp.backupRetentionPeriod == null || Number(rp.backupRetentionPeriod) !== 0) return null;
+    return {
+      key: 'aws_backup_disabled',
+      title: 'Backups automaticos do banco RDS desligados',
+      severity: 8,
+      actor: actorOf(r),
+      target: rp.dBInstanceIdentifier ?? null,
+      action: r.eventName,
+    };
+  },
+
+  // aws_backup_tamper — apagar cofre/plano/ponto de recuperação ou parar job do AWS Backup
+  // = inibir recuperação / destruição de backup (T1490/T1485). Alto sinal (não é rotina).
+  function backupTamper(r) {
+    const sev = {
+      DeleteBackupVault: 9,
+      DeleteBackupPlan: 8,
+      DeleteRecoveryPoint: 9,
+      StopBackupJob: 8,
+      DeleteBackupVaultLockConfiguration: 9,
+    }[r.eventName];
+    if (!sev) return null;
+    const rp = r.requestParameters ?? {};
+    return {
+      key: 'aws_backup_tamper',
+      title: 'Backup na nuvem apagado ou interrompido',
+      severity: sev,
+      actor: actorOf(r),
+      target: rp.backupVaultName ?? rp.backupPlanId ?? rp.recoveryPointArn ?? rp.backupJobId ?? null,
+      action: r.eventName,
+    };
+  },
+
   // ── Trilha de MUDANÇA (world='change' no Argos: avisa por e-mail/Telegram, NUNCA liga) ──
   // O Argos não é só cibersegurança: mudança de recurso (subiu/derrubou máquina) o dono
   // precisa saber, mesmo sem ser ataque nem queda. Ver docs/ROADMAP-NOTIFICACAO.md.

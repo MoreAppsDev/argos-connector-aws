@@ -392,3 +392,63 @@ test('RunInstances de 3 máquinas → aws_ec2_run com contagem no alvo', () => {
   assert.equal(d?.key, 'aws_ec2_run');
   assert.equal(d.target, '3 instâncias EC2');
 });
+
+test('ModifyDBInstance retention=0 → aws_backup_disabled sev 8', () => {
+  const d = detect({
+    eventID: 'bkp1',
+    eventName: 'ModifyDBInstance',
+    eventSource: 'rds.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'intruso' },
+    requestParameters: { dBInstanceIdentifier: 'prod-db', backupRetentionPeriod: 0 },
+  });
+  assert.equal(d?.key, 'aws_backup_disabled');
+  assert.equal(d.severity, 8);
+  assert.equal(d.target, 'prod-db');
+});
+
+test('ModifyDBInstance sem mexer em backup → ignorado', () => {
+  const d = detect({
+    eventID: 'bkp2',
+    eventName: 'ModifyDBInstance',
+    eventSource: 'rds.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'devops' },
+    requestParameters: { dBInstanceIdentifier: 'prod-db', allocatedStorage: 100 },
+  });
+  assert.equal(d, null);
+});
+
+test('ModifyDBInstance retention=7 → ignorado (não zerou)', () => {
+  const d = detect({
+    eventID: 'bkp3',
+    eventName: 'ModifyDBInstance',
+    eventSource: 'rds.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'devops' },
+    requestParameters: { dBInstanceIdentifier: 'prod-db', backupRetentionPeriod: 7 },
+  });
+  assert.equal(d, null);
+});
+
+test('DeleteBackupVault → aws_backup_tamper sev 9', () => {
+  const d = detect({
+    eventID: 'bkp4',
+    eventName: 'DeleteBackupVault',
+    eventSource: 'backup.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'intruso' },
+    requestParameters: { backupVaultName: 'cofre-prod' },
+  });
+  assert.equal(d?.key, 'aws_backup_tamper');
+  assert.equal(d.severity, 9);
+  assert.equal(d.target, 'cofre-prod');
+});
+
+test('StopBackupJob → aws_backup_tamper sev 8', () => {
+  const d = detect({
+    eventID: 'bkp5',
+    eventName: 'StopBackupJob',
+    eventSource: 'backup.amazonaws.com',
+    userIdentity: { type: 'IAMUser', userName: 'intruso' },
+    requestParameters: { backupJobId: 'job-123' },
+  });
+  assert.equal(d?.key, 'aws_backup_tamper');
+  assert.equal(d.severity, 8);
+});

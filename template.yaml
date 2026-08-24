@@ -127,6 +127,13 @@ Resources:
                   - ModifyDBClusterSnapshotAttribute
                   - DeleteDBInstance
                   - DeleteDBCluster
+                  # Backup — inibir recuperação (T1490): desligar/apagar backup de nuvem
+                  - ModifyDBInstance
+                  - DeleteBackupVault
+                  - DeleteBackupPlan
+                  - DeleteRecoveryPoint
+                  - StopBackupJob
+                  - DeleteBackupVaultLockConfiguration
         # Heartbeat (liveness): pinga o Argos a cada 15 min mesmo sem evento, pra
         # o painel distinguir "vivo e quieto" de "offline".
         Heartbeat:

@@ -490,6 +490,13 @@ export async function runScan(defaultRegion) {
             new rdsm.DescribeDBInstancesCommand({ Marker: marker, MaxRecords: 100 }),
           );
           for (const db of r.DBInstances ?? []) {
+            // Saúde de BACKUP (T1490 / infra): retenção 0 = sem backup automático; idade do
+            // último ponto restaurável = "rodou / está obsoleto?". Vem do próprio Describe,
+            // sem permissão extra. O Argos calcula o veredito (postura) do lado do app.
+            const retention = db.BackupRetentionPeriod ?? 0;
+            const restorableAgeHours = db.LatestRestorableTime
+              ? Math.floor((Date.now() - new Date(db.LatestRestorableTime).getTime()) / 3_600_000)
+              : null;
             inv.databases.push({
               id: db.DBInstanceIdentifier,
               engine: db.Engine ?? null,
@@ -503,6 +510,10 @@ export async function runScan(defaultRegion) {
               region,
               az: db.AvailabilityZone ?? null,
               status: db.DBInstanceStatus ?? null,
+              backupRetentionDays: retention,
+              backupEnabled: retention > 0,
+              latestRestorableAgeHours: restorableAgeHours,
+              deletionProtection: Boolean(db.DeletionProtection),
             });
           }
           marker = r.Marker;
