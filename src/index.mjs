@@ -24,6 +24,23 @@ const CONNECTION_ID = process.env.ARGOS_SOURCE_CONNECTION_ID;
 const HMAC_SECRET = process.env.ARGOS_HMAC_SECRET;
 // carimbo da instalação do Argos (opcional): o Argos recusa coletor configurado pra outra instalação
 const INSTALL = process.env.ARGOS_INSTALL || '';
+/**
+ * Versão DESTE coletor, enviada em todo request como cabeçalho.
+ *
+ * Existe porque o Argos não tinha como saber que a Lambda de um cliente estava
+ * velha: ela roda na conta DELE, a nossa credencial lá é só leitura, e não há
+ * atualização automática possível (nem desejável: seria código nosso baixado da
+ * internet e executado dentro da conta do cliente). Uma instalação ficou três
+ * meses atrás da nossa sem ninguém perceber. Carimbar a versão não atualiza nada,
+ * mas acaba com o "não sabíamos".
+ *
+ * Vai como CABEÇALHO de propósito, nunca no corpo: o corpo é o que a assinatura
+ * HMAC cobre, e mexer nele quebraria todo coletor que ainda não atualizou.
+ *
+ * SOBE A CADA RELEASE que mexa em `src/`. O `connector-aws-release.mjs` recusa
+ * publicar se o código mudou e isto aqui não.
+ */
+const COLLECTOR_VERSION = '1.1.0';
 // Endpoints derivados do host da ingestão (sem exigir novas env vars).
 const HEARTBEAT_URL = INGEST_URL ? INGEST_URL.replace(/\/security-event\/?$/, '/heartbeat') : null;
 const POSTURE_URL = INGEST_URL ? INGEST_URL.replace(/\/security-event\/?$/, '/posture') : null;
@@ -61,6 +78,7 @@ async function sendPostureScan() {
       'x-argos-signature': sign(rawBody),
       'x-argos-source-connection-id': CONNECTION_ID,
       ...(INSTALL ? { 'x-argos-install': INSTALL } : {}),
+      'x-argos-collector-version': COLLECTOR_VERSION,
     },
     body: rawBody,
   });
@@ -84,6 +102,7 @@ async function sendHeartbeat() {
       'x-argos-signature': sign(rawBody),
       'x-argos-source-connection-id': CONNECTION_ID,
       ...(INSTALL ? { 'x-argos-install': INSTALL } : {}),
+      'x-argos-collector-version': COLLECTOR_VERSION,
     },
     body: rawBody,
   });
@@ -137,6 +156,7 @@ export async function handler(event) {
       'x-argos-signature': sign(rawBody),
       'x-argos-source-connection-id': CONNECTION_ID,
       ...(INSTALL ? { 'x-argos-install': INSTALL } : {}),
+      'x-argos-collector-version': COLLECTOR_VERSION,
     },
     body: rawBody,
   });
