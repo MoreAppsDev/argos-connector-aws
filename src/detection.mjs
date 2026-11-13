@@ -148,6 +148,56 @@ const RULES = [
     };
   },
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // ALIMENTO DA LINHA DE BASE (2026-11-13, fase 7.10).
+  //
+  // Por que existem: este coletor filtra na BORDA e só mandava o que já era suspeito.
+  // Resultado: não existia o NORMAL para comparar, e "acesso de um país diferente do
+  // habitual" era impossível por construção. O cliente apontou acesso da Coreia e a
+  // resposta honesta foi "não temos o dado".
+  //
+  // As duas regras abaixo mandam todo login de console, inclusive o certo. São baratas
+  // (login de console é raro) e nascem com desfecho `log` no Argos: registram, não
+  // abrem chamado. Quem decide se a origem é estranha é o Argos, que tem a linha de
+  // base; a borda não tem como saber.
+  //
+  // Severidade baixa de propósito: `detect()` devolve o de MAIOR severidade, então
+  // login sem MFA continua saindo como `console_login_no_mfa` (7) e login root como
+  // `root_login` (9). Estas só aparecem quando nenhuma das outras casou.
+  //
+  // NÃO precisam de mudança no CloudFormation: a regra ConsoleSignIn do EventBridge já
+  // entrega TODO sign-in ao Lambda, sem filtro de nome de evento.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  // aws_console_login — login de console bem-sucedido, o normal inclusive.
+  function consoleLogin(r) {
+    if (r.eventName !== 'ConsoleLogin') return null;
+    if (r.responseElements?.ConsoleLogin !== 'Success') return null;
+    return {
+      key: 'aws_console_login',
+      title: 'Login no console da AWS',
+      severity: 2,
+      actor: actorOf(r),
+      target: r.recipientAccountId ?? r.userIdentity?.accountId ?? null,
+      action: 'ConsoleLogin',
+    };
+  },
+
+  // aws_console_login_failed — tentativa de login que não entrou.
+  function consoleLoginFailed(r) {
+    if (r.eventName !== 'ConsoleLogin') return null;
+    if (r.userIdentity?.type === 'Root') return null; // root falho é root_login
+    if (r.responseElements?.ConsoleLogin === 'Success') return null;
+    return {
+      key: 'aws_console_login_failed',
+      title: 'Tentativa de login no console da AWS que falhou',
+      severity: 3,
+      actor: actorOf(r),
+      target: r.recipientAccountId ?? r.userIdentity?.accountId ?? null,
+      action: 'ConsoleLogin',
+    };
+  },
+
   // iam_attach_admin_policy — concessão de política de administrador.
   function iamAttachAdminPolicy(r) {
     const names = ['AttachUserPolicy', 'AttachRolePolicy', 'AttachGroupPolicy'];

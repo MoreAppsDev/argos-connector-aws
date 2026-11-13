@@ -22,6 +22,8 @@ import { runScan } from './scan.mjs';
 const INGEST_URL = process.env.ARGOS_INGEST_URL;
 const CONNECTION_ID = process.env.ARGOS_SOURCE_CONNECTION_ID;
 const HMAC_SECRET = process.env.ARGOS_HMAC_SECRET;
+// carimbo da instalação do Argos (opcional): o Argos recusa coletor configurado pra outra instalação
+const INSTALL = process.env.ARGOS_INSTALL || '';
 // Endpoints derivados do host da ingestão (sem exigir novas env vars).
 const HEARTBEAT_URL = INGEST_URL ? INGEST_URL.replace(/\/security-event\/?$/, '/heartbeat') : null;
 const POSTURE_URL = INGEST_URL ? INGEST_URL.replace(/\/security-event\/?$/, '/posture') : null;
@@ -58,6 +60,7 @@ async function sendPostureScan() {
       'content-type': 'application/json',
       'x-argos-signature': sign(rawBody),
       'x-argos-source-connection-id': CONNECTION_ID,
+      ...(INSTALL ? { 'x-argos-install': INSTALL } : {}),
     },
     body: rawBody,
   });
@@ -80,6 +83,7 @@ async function sendHeartbeat() {
       'content-type': 'application/json',
       'x-argos-signature': sign(rawBody),
       'x-argos-source-connection-id': CONNECTION_ID,
+      ...(INSTALL ? { 'x-argos-install': INSTALL } : {}),
     },
     body: rawBody,
   });
@@ -132,6 +136,7 @@ export async function handler(event) {
       'content-type': 'application/json',
       'x-argos-signature': sign(rawBody),
       'x-argos-source-connection-id': CONNECTION_ID,
+      ...(INSTALL ? { 'x-argos-install': INSTALL } : {}),
     },
     body: rawBody,
   });

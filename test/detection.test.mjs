@@ -86,8 +86,32 @@ test('login sem MFA → console_login_no_mfa', () => {
   assert.equal(d.actor, 'joao');
 });
 
-test('login COM MFA → ignorado', () => {
-  assert.equal(detect(loginWithMfa), null);
+// MUDOU EM 2026-11-13 (fase 7.10). Antes este teste travava "login com MFA e
+// ignorado", e era justamente esse descarte na borda que tornava impossivel ter linha
+// de base de origem: sem o normal, nao da pra dizer que um acesso veio de lugar
+// estranho. O cliente apontou acesso da Coreia e nao havia dado nenhum pra conferir.
+// Agora o login certo tambem sobe, com severidade 2 e desfecho `log` no Argos:
+// registra, nao abre chamado, e alimenta a comparacao.
+test('login COM MFA sobe como aws_console_login sev 2 (alimenta a linha de base)', () => {
+  const d = detect(loginWithMfa);
+  assert.equal(d?.key, 'aws_console_login');
+  assert.equal(d.severity, 2);
+  assert.equal(d.action, 'ConsoleLogin');
+});
+
+test('login SEM MFA continua sendo console_login_no_mfa (sev 7 ganha da 2)', () => {
+  assert.equal(detect(loginNoMfa)?.key, 'console_login_no_mfa');
+});
+
+test('login root continua sendo root_login (sev 9 ganha de todas)', () => {
+  assert.equal(detect(rootLogin)?.key, 'root_login');
+});
+
+test('login que falhou vira aws_console_login_failed', () => {
+  const falho = { ...loginWithMfa, responseElements: { ConsoleLogin: 'Failure' } };
+  const d = detect(falho);
+  assert.equal(d?.key, 'aws_console_login_failed');
+  assert.equal(d.severity, 3);
 });
 
 test('attach AdministratorAccess → iam_attach_admin_policy sev 8', () => {
