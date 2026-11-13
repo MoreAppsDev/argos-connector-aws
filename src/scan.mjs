@@ -83,6 +83,10 @@ export async function runScan(defaultRegion) {
     trails: [],
     // Saúde do backup de nuvem (AWS Backup): nº de cofres + jobs FALHOS/EXPIRADOS (7d).
     backup: { vaults: 0, failedJobs: [] },
+    // ALCANCE: o que torna uma máquina REALMENTE alcançável da internet. Sem isto o
+    // Argos só sabia olhar IP público, e tratava "regra aberta" como exposição mesmo
+    // quando nada chegava lá. Ver lib/posture/sg-exposure.ts no app.
+    network: { scanned: false, publicSubnets: [], internetFacingLbs: [] },
     regions_scanned: [],
   };
 
@@ -343,6 +347,12 @@ export async function runScan(defaultRegion) {
                 state: i.State?.Name ?? null,
                 publicIp: i.PublicIpAddress ?? null,
                 privateIp: i.PrivateIpAddress ?? null,
+                subnetId: i.SubnetId ?? null,
+                // IPv6 com rota pra internet é alcançável mesmo SEM IPv4 público:
+                // é o caminho de entrada que mais passa despercebido.
+                ipv6: (i.NetworkInterfaces ?? []).flatMap((n) =>
+                  (n.Ipv6Addresses ?? []).map((a) => a.Ipv6Address).filter(Boolean),
+                ),
                 type: i.InstanceType ?? null,
                 az: i.Placement?.AvailabilityZone ?? null,
                 os: i.PlatformDetails ?? (i.Platform === 'windows' ? 'Windows' : 'Linux'),
@@ -435,6 +445,117 @@ export async function runScan(defaultRegion) {
           }
           t2 = r.NextToken;
         } while (t2);
+
+        // ── ALCANCE: sub-rede pública e balanceador voltado pra internet ──────
+        // Só LEITURA, e tudo já coberto pela política SecurityAudit que o conector
+        // usa (ec2:Describe*, elasticloadbalancing:Describe*). Nenhuma permissão
+        // nova, nenhuma escrita.
+        //
+        // Por que isto existe: um grupo de segurança liberado para 0.0.0.0/0 numa
+        // máquina SEM IP público não expõe nada pela internet... a não ser que ela
+        // esteja atrás de um balanceador voltado pra fora, ou que tenha IPv6 numa
+        // sub-rede com rota pra Internet Gateway. Sem ler isto, o Argos chutava.
+        try {
+          // tabela de rotas → quais sub-redes têm saída/entrada por Internet Gateway
+          const rotaDaSubrede = new Map(); // subnetId → tem rota pra IGW
+          let semRota = true; // sub-rede sem associação explícita usa a rota principal da VPC
+          const principalPorVpc = new Map();
+          let rt;
+          do {
+            const rr = await ec2.send(new ec2m.DescribeRouteTablesCommand({ NextToken: rt }));
+            for (const tabela of rr.RouteTables ?? []) {
+              const paraIgw = (tabela.Routes ?? []).some(
+                (r) =>
+                  (r.DestinationCidrBlock === '0.0.0.0/0' ||
+                    r.DestinationIpv6CidrBlock === '::/0') &&
+                  String(r.GatewayId ?? '').startsWith('igw-'),
+              );
+              for (const assoc of tabela.Associations ?? []) {
+                if (assoc.Main) principalPorVpc.set(tabela.VpcId, paraIgw);
+                if (assoc.SubnetId) {
+                  rotaDaSubrede.set(assoc.SubnetId, paraIgw);
+                  semRota = false;
+                }
+              }
+            }
+            rt = rr.NextToken;
+          } while (rt);
+
+          let st;
+          do {
+            const sr = await ec2.send(new ec2m.DescribeSubnetsCommand({ NextToken: st }));
+            for (const sub of sr.Subnets ?? []) {
+              const explicita = rotaDaSubrede.get(sub.SubnetId);
+              const publica = explicita ?? principalPorVpc.get(sub.VpcId) ?? false;
+              if (publica) inv.network.publicSubnets.push(sub.SubnetId);
+            }
+            st = sr.NextToken;
+          } while (st);
+          void semRota;
+
+          // balanceadores voltados pra internet e QUAIS máquinas eles servem.
+          // Importação PREGUIÇOSA e tolerante: se o runtime não tiver o pacote, a
+          // varredura perde só o alcance por balanceador, nunca o resto.
+          const elbv2m = await import('@aws-sdk/client-elastic-load-balancing-v2');
+          const elbv2 = new elbv2m.ElasticLoadBalancingV2Client({ region });
+          const lbs = await elbv2.send(new elbv2m.DescribeLoadBalancersCommand({ PageSize: 100 }));
+          for (const lb of lbs.LoadBalancers ?? []) {
+            if (lb.Scheme !== 'internet-facing') continue;
+            if (inv.network.internetFacingLbs.length >= 40) break;
+            const portas = [];
+            const alvos = [];
+            try {
+              const ls = await elbv2.send(
+                new elbv2m.DescribeListenersCommand({ LoadBalancerArn: lb.LoadBalancerArn }),
+              );
+              for (const l of ls.Listeners ?? []) if (l.Port != null) portas.push(Number(l.Port));
+              const tgs = await elbv2.send(
+                new elbv2m.DescribeTargetGroupsCommand({ LoadBalancerArn: lb.LoadBalancerArn }),
+              );
+              for (const tg of (tgs.TargetGroups ?? []).slice(0, 20)) {
+                const th = await elbv2.send(
+                  new elbv2m.DescribeTargetHealthCommand({ TargetGroupArn: tg.TargetGroupArn }),
+                );
+                for (const t of th.TargetHealthDescriptions ?? []) {
+                  const id = t.Target?.Id;
+                  if (id && String(id).startsWith('i-') && !alvos.includes(id)) alvos.push(id);
+                }
+              }
+            } catch {}
+            inv.network.internetFacingLbs.push({
+              name: lb.LoadBalancerName ?? lb.LoadBalancerArn,
+              region,
+              dns: lb.DNSName ?? null,
+              kind: lb.Type ?? 'application',
+              ports: portas,
+              targets: alvos,
+            });
+          }
+
+          // balanceador clássico: devolve as máquinas direto, uma chamada só
+          try {
+            const elbm = await import('@aws-sdk/client-elastic-load-balancing');
+            const elb = new elbm.ElasticLoadBalancingClient({ region });
+            const cl = await elb.send(new elbm.DescribeLoadBalancersCommand({ PageSize: 100 }));
+            for (const lb of cl.LoadBalancerDescriptions ?? []) {
+              if (lb.Scheme !== 'internet-facing') continue;
+              if (inv.network.internetFacingLbs.length >= 40) break;
+              inv.network.internetFacingLbs.push({
+                name: lb.LoadBalancerName,
+                region,
+                dns: lb.DNSName ?? null,
+                kind: 'classic',
+                ports: (lb.ListenerDescriptions ?? [])
+                  .map((l) => Number(l.Listener?.LoadBalancerPort))
+                  .filter((n) => Number.isFinite(n)),
+                targets: (lb.Instances ?? []).map((i) => i.InstanceId).filter(Boolean),
+              });
+            }
+          } catch {}
+
+          // só promete alcance medido se a leitura de rota realmente aconteceu
+          inv.network.scanned = true;
+        } catch {}
 
         const rv = await ec2.send(new ec2m.DescribeVpcsCommand({}));
         for (const v of rv.Vpcs ?? []) {

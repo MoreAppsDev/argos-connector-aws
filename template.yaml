@@ -52,6 +52,15 @@ Resources:
                 # cobrir, então garantimos aqui. Nenhuma escrita.
                 - backup:ListBackupJobs
                 - backup:ListBackupVaults
+                # ALCANCE: saber se uma máquina SEM IP público está atrás de um balanceador
+                # voltado pra internet. Sem isto o Argos chuta, e chutar nos dois sentidos é
+                # ruim: ou acusa exposição que não existe, ou esconde exposição que existe.
+                # SecurityAudit já cobre, mas deixamos explícito pra não depender do conteúdo
+                # de uma política gerenciada da AWS. Tudo Describe, nenhuma escrita.
+                - elasticloadbalancing:DescribeLoadBalancers
+                - elasticloadbalancing:DescribeListeners
+                - elasticloadbalancing:DescribeTargetGroups
+                - elasticloadbalancing:DescribeTargetHealth
               Resource: '*'
       Environment:
         Variables:
